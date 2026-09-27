@@ -106,3 +106,36 @@ def test_webhook_authentication() -> None:
     authorize({"authorization": "Bearer token"}, mode="bearer", bearer_token="token")
     with pytest.raises(PermissionError):
         authorize({"authorization": "Bearer wrong"}, mode="bearer", bearer_token="token")
+
+def test_webhook_publishes_payload_and_reporting_week(monkeypatch: pytest.MonkeyPatch) -> None:
+    import main
+
+    published: list[dict] = []
+
+    class FakePublisher:
+        def __init__(self, topic: str) -> None:
+            assert topic == "projects/test/topics/jobs"
+
+        def publish(self, message: dict) -> str:
+            published.append(message)
+            return "message-id"
+
+    monkeypatch.setenv("PUBSUB_TOPIC", "projects/test/topics/jobs")
+    monkeypatch.setenv("WEBHOOK_BEARER_TOKEN", "token")
+    monkeypatch.setattr(main, "PubSubPublisher", FakePublisher)
+    monkeypatch.setattr(main, "datetime", _FixedDateTime)
+
+    result = main.webhook({"resultObject": []}, authorization="Bearer token")
+
+    assert result["status"] == "accepted"
+    assert published[0]["payload"] == {"resultObject": []}
+    assert published[0]["reporting_week"] == {
+        "week_start": "2026-09-21",
+        "week_end": "2026-09-27",
+    }
+
+
+class _FixedDateTime(datetime):
+    @classmethod
+    def now(cls, tz: timezone | None = None) -> "_FixedDateTime":
+        return cls(2026, 9, 27, 12, tzinfo=tz)

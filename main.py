@@ -10,6 +10,7 @@ from typing import Any, Optional
 from fastapi import FastAPI, Header, HTTPException, Query
 
 from app.config import Settings
+from app.date_windows import reporting_window
 from app.pubsub import PubSubPublisher
 from app.webhook import authorize
 
@@ -41,10 +42,15 @@ def webhook(
     job_id = str(uuid.uuid4())
     try:
         report_date = datetime.now(timezone.utc).isoformat()
+        report_window = reporting_window(datetime.now(timezone.utc), settings.reporting_timezone)
         PubSubPublisher(settings.pubsub_topic).publish({
             "job_id": job_id,
             "payload": payload,
             "reporting_date": report_date,
+            "reporting_week": {
+                "week_start": report_window.week_start,
+                "week_end": report_window.week_end,
+            },
         })
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Unable to queue webhook job") from exc
@@ -54,14 +60,12 @@ def webhook(
 def process_pubsub_message(message: dict[str, Any]) -> None:
     """Worker entry point; cloud wiring is intentionally kept outside the webhook path."""
     from app.gemini_client import GeminiTextGenerator
-    from app.gcs_store import GCSRawPayloadStore
     from app.processor import process_payload
     from app.sheets_store import SheetsStore
 
     settings = Settings.from_env()
     payload = message["payload"]
     job_id = str(message["job_id"])
-    GCSRawPayloadStore(settings.gcs_bucket_name).save(job_id, payload)
     sheets = SheetsStore(settings.output_spreadsheet_id)
     mappings = sheets.read_customer_info()
     client = GeminiTextGenerator(os.environ["GEMINI_API_KEY"], settings.gemini_model_name)
