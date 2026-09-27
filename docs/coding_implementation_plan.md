@@ -18,9 +18,10 @@ The worker must:
 
 1. Validate the webhook envelope and reject malformed requests explicitly.
 2. Assign a stable job ID and reporting week before processing.
-3. Archive the exact raw payload to GCS using a collision-resistant object name.
+3. Include the webhook payload and job metadata in the Pub/Sub message so the
+   worker has everything needed for asynchronous processing and retry.
 4. Parse both JSON arrays and JSON strings when PhantomBuster wraps results.
-5. Resolve customer names through the manual mapping table.
+5. Resolve customer names through the manual mapping table in Google Sheets.
 6. Normalize timestamps into UTC internally and compare them using
    `Australia/Brisbane` week boundaries.
 7. Reject malformed dates rather than treating them as valid.
@@ -69,8 +70,9 @@ policy.
 Pub/Sub delivery uses three processing attempts with exponential backoff.
 After the final failed attempt, the job is sent to the dead-letter path.
 
-The system must provide a manual reprocessing operation that reads the retained
-GCS payload and republishes a corrected job without scraping LinkedIn again.
+The system must provide a manual reprocessing operation that republishes the
+retained Pub/Sub payload, or accepts the same payload again, without scraping
+LinkedIn again. No separate raw-payload archive is required.
 
 Use structured logs with:
 
@@ -110,10 +112,11 @@ The write layer must:
 - retry transient Sheets quota and network errors;
 - preserve historical reporting weeks.
 
-The spreadsheet is a reporting surface, not the durable processing database.
-GCS is the short-term raw recovery source. If volume or concurrent operators
-grows substantially, introduce Firestore or Cloud SQL as the system of record
-and treat Sheets as an export.
+Google Sheets is the only application data store and is the system of record for
+the mapping, post-detail, and weekly-summary data. Because the expected volume
+is small, do not add GCS, Firestore, Cloud SQL, or another persistence layer.
+Pub/Sub is used only for asynchronous delivery, retry, and dead-letter
+handling; its message retention must cover the operational recovery window.
 
 ## 13. Source code structure
 
@@ -131,7 +134,6 @@ linkedin-automation/
 │   ├── date_windows.py
 │   ├── normalization.py
 │   ├── summarization.py
-│   ├── gcs_store.py
 │   ├── sheets_store.py
 │   └── logging.py
 ├── tests/
@@ -154,12 +156,12 @@ Use versioned, non-interactive `gcloud` scripts to:
 1. Enable APIs.
 2. Create or verify the service account.
 3. Create Pub/Sub topics, subscriptions, and dead-letter resources.
-4. Create the private GCS bucket and 30-day lifecycle rule.
-5. Create or verify Secret Manager secrets.
-6. Deploy Cloud Run in `australia-southeast1`.
-7. Configure Pub/Sub push or authenticated worker delivery.
-8. Configure environment variables and secret references.
-9. Print the webhook endpoint and required PhantomBuster settings.
+4. Create or verify Secret Manager secrets.
+5. Deploy Cloud Run in `australia-southeast1`.
+6. Configure Pub/Sub push or authenticated worker delivery and message
+   retention for the recovery window.
+7. Configure environment variables and secret references.
+8. Print the webhook endpoint and required PhantomBuster settings.
 
 Do not enable always-allocated CPU merely to keep an in-process background task
 alive. The durable Pub/Sub design allows request-based CPU allocation unless
@@ -201,13 +203,13 @@ Use `result.xls` or a converted representative fixture containing:
 
 ### Mocked integration tests
 
-Mock Pub/Sub, Gemini, GCS, and Sheets to verify:
+Mock Pub/Sub, Gemini, and Sheets to verify:
 
 - webhook authentication;
 - durable job publication;
 - retry behavior;
 - dead-letter behavior;
-- raw payload archival;
+- payload and job metadata are present in the Pub/Sub message;
 - idempotent upsert;
 - failure status propagation.
 
@@ -218,7 +220,7 @@ Confirm:
 
 - the webhook returns quickly;
 - a Pub/Sub message is created;
-- raw payload is archived;
+- a failed delivery can be reprocessed from the retained Pub/Sub payload;
 - post details are enriched;
 - customer weekly summaries are written;
 - a customer with no posts receives `post_count = 0`;
@@ -227,3 +229,164 @@ Confirm:
 
 The implementation is complete only when automated tests pass and the manual
 smoke test succeeds.
+
+## 16. Integration
+
+Integration must be completed incrementally. GitHub is the source-code
+repository; it is not part of the runtime data path. The initial deployment can
+be performed from a local checkout with `gcloud run deploy --source .`.
+Automated GitHub-to-Cloud-Run deployment is deferred with CI/CD.
+
+### 16.1 Runtime data flow
+
+The components connect as follows:
+
+```text
+Google Sheets: customer_info
+        |
+        | Public view URL
+        v
+PhantomBuster
+        | HTTPS POST /webhook
+        v
+Cloud Run webhook
+        | Publish payload and job metadata
+        v
+Pub/Sub topic and subscription
+        | Authenticated push
+        v
+Cloud Run worker: /pubsub
+        | Read mappings and write results
+        +--> Google Sheets: post_details, weekly_summary
+        |
+        +--> Gemini API: generate validated summaries
+```
+
+Google Sheets is the only application data store. Pub/Sub is used only for
+asynchronous delivery, retry, and dead-letter handling. Gemini only generates
+summaries; it does not receive webhooks or store application data.
+
+### 16.2 Integration prerequisites
+
+Before deployment:
+
+1. Remove all remaining GCS dependencies from the application, deployment
+   scripts, dependencies, and configuration. The worker must not archive raw
+   payloads in GCS.
+2. Create or select a Google Cloud project with billing enabled.
+3. Use `australia-southeast1` as the default Cloud Run region.
+4. Create one runtime service account for Cloud Run.
+5. Create one Google Sheets workbook with a `customer_info` tab containing:
+
+   ```text
+   customer_name
+   linkedin_profile_url
+   ```
+
+6. Share the workbook with the runtime service account as an editor.
+7. Keep the `customer_info` tab publicly viewable for PhantomBuster, and do not
+   put credentials, secrets, or internal notes in that tab.
+
+### 16.3 Google Cloud services and permissions
+
+Enable the required APIs:
+
+- Cloud Run;
+- Cloud Build;
+- Pub/Sub;
+- Secret Manager;
+- Google Sheets;
+- Google Drive;
+- Cloud Logging and Monitoring.
+
+Create:
+
+- one Cloud Run service;
+- one Pub/Sub processing topic and subscription;
+- one Pub/Sub dead-letter topic and subscription;
+- Secret Manager secrets for the Gemini API key and webhook credential.
+
+Grant the runtime service account only the permissions required to publish and
+consume the configured Pub/Sub resources and access the configured secrets.
+Use Application Default Credentials in Cloud Run; do not use downloaded service
+account key files.
+
+### 16.4 Secrets and runtime configuration
+
+Store the following as Secret Manager secrets:
+
+```text
+GEMINI_API_KEY
+WEBHOOK_BEARER_TOKEN
+```
+
+Configure the following as Cloud Run environment variables or equivalent
+non-secret settings:
+
+```text
+OUTPUT_SPREADSHEET_ID
+PUBSUB_TOPIC
+PUBSUB_SUBSCRIPTION
+GEMINI_MODEL_NAME=gemini-2.5-flash
+REPORTING_TIMEZONE=Australia/Brisbane
+WEBHOOK_AUTH_MODE=bearer
+```
+
+The Gemini request path is:
+
+```text
+Cloud Run worker -> Gemini API -> validated summary response
+```
+
+The API key and bearer token must never be committed, printed, or written to
+application logs.
+
+### 16.5 Deployment sequence
+
+Complete and verify each step before continuing:
+
+1. Run the local unit and fixture tests.
+2. Run the local service and verify `GET /health`.
+3. Deploy the Cloud Run service from the repository checkout.
+4. Verify the deployed `/health` endpoint.
+5. Create the Pub/Sub topic, worker subscription, dead-letter resources, and
+   authenticated push delivery to the deployed `/pubsub` endpoint.
+6. Store secrets and attach them to the Cloud Run service.
+7. Confirm the service can read and update the workbook.
+8. Send an invalid webhook request and verify `401 Unauthorized`.
+9. Send a valid representative PhantomBuster payload to `/webhook` and verify
+   that it returns quickly and publishes a Pub/Sub message.
+10. Verify the worker receives the message, calls Gemini, and upserts
+    `post_details` and `weekly_summary`.
+11. Repeat the same payload and verify that deterministic upsert keys prevent
+    duplicate rows.
+12. Test a zero-post customer, malformed records, and a failed delivery.
+13. Confirm Pub/Sub retry and dead-letter behavior.
+
+### 16.6 PhantomBuster configuration
+
+Configure PhantomBuster only after the Cloud Run webhook and Pub/Sub worker have
+passed the representative payload test:
+
+1. Set the input URL to the public `customer_info` sheet.
+2. Configure the weekly LinkedIn scraping workflow and exact Monday-Sunday
+   date range where supported.
+3. Configure JSON export.
+4. Configure the completion webhook:
+
+   ```text
+   https://<cloud-run-hostname>/webhook
+   ```
+
+5. Configure the bearer token using PhantomBuster's supported custom header
+   mechanism. Use the documented query-secret fallback only if custom headers
+   are unavailable.
+6. Run a small test job against test profiles before enabling the weekly
+   schedule.
+
+The expected production flow is:
+
+```text
+PhantomBuster -> POST /webhook -> Pub/Sub -> POST /pubsub
+-> Gemini -> Google Sheets
+```

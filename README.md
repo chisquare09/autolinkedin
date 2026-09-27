@@ -27,9 +27,10 @@ Application Default Credentials when deployed.
   a durable Pub/Sub job.
 - `POST /pubsub` accepts a Pub/Sub push envelope and processes a queued job.
 
-The production worker archives the raw payload in private GCS, reads the
+The production worker reads the retained Pub/Sub payload, loads the
 `customer_info` sheet, summarizes qualifying posts with Gemini, and upserts
-`post_details` and `weekly_summary`.
+`post_details` and `weekly_summary`. Google Sheets is the only application data
+store.
 
 ## Configuration
 
@@ -37,8 +38,8 @@ Required runtime configuration includes:
 
 ```text
 OUTPUT_SPREADSHEET_ID
-GCS_BUCKET_NAME
 PUBSUB_TOPIC
+PUBSUB_SUBSCRIPTION
 GEMINI_API_KEY
 WEBHOOK_AUTH_MODE=bearer
 WEBHOOK_BEARER_TOKEN
@@ -51,6 +52,11 @@ service-account key files.
 
 ## Deployment
 
-The scripts under `scripts/` create the basic Google Cloud resources and deploy
-the container. Review the generated IAM bindings and configure authenticated
-Pub/Sub push delivery before production use.
+The scripts under `scripts/` enable the required APIs, create the Pub/Sub
+processing and dead-letter resources with three delivery attempts and message
+retention, and deploy the container with Secret Manager references. Set
+`PROJECT_ID`, `SERVICE_ACCOUNT`, `PUBSUB_TOPIC`, `PUBSUB_SUBSCRIPTION`,
+`OUTPUT_SPREADSHEET_ID`, and create the `GEMINI_API_KEY` and
+`WEBHOOK_BEARER_TOKEN` secrets before running them. Configure authenticated
+Pub/Sub push delivery to `/pubsub` using the runtime service account before
+production use.

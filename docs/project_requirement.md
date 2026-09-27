@@ -5,9 +5,10 @@
 Automate the weekly review of LinkedIn activity for customer profiles:
 
 1. PhantomBuster retrieves posts for each mapped LinkedIn profile.
-2. Google Cloud receives and durably queues the scraping result.
+2. Google Cloud receives and queues the scraping result for asynchronous processing.
 3. Cloud Run validates, normalizes, deduplicates, and summarizes the posts with Gemini.
-4. The application writes enriched post data and customer-level weekly summaries to one Google Sheets workbook.
+4. The application writes all retained mapping, enriched post, and customer-level
+   weekly summary data to one Google Sheets workbook.
 
 The reporting period is a deterministic calendar week:
 
@@ -37,9 +38,9 @@ The system must use the reporting period stored on the job rather than calculati
 | Output tabs | `customer_info`, `post_details`, `weekly_summary` |
 | Output history | Retain historical weeks |
 | Reruns | Upsert existing results, never blindly append duplicates |
-| Raw payload retention | Private GCS storage for 30 days |
+| Application data storage | Google Sheets only; no GCS or other database |
 | Retry policy | Three attempts with exponential backoff |
-| Failed jobs | Dead-letter handling and manual reprocessing |
+| Failed jobs | Dead-letter handling and manual reprocessing by republishing the Pub/Sub payload |
 | AI language | English |
 | AI tone | Executive-neutral |
 | Per-post summary | Maximum three sentences |
@@ -179,23 +180,22 @@ PhantomBuster weekly date-range run
 Authenticated Cloud Run webhook receiver
         |
         +-- validate request and payload envelope
-        +-- determine/store reporting week
-        +-- publish a Pub/Sub job
+        +-- determine the reporting week
+        +-- publish the payload and job metadata as a Pub/Sub job
         +-- return a fast 2xx response
                          |
                          v
                  Cloud Run worker
         1. Validate the complete payload schema
-        2. Store the raw payload in private GCS
-        3. Load and validate the mapping rows
-        4. Normalize profile URLs and deduplicate mappings
-        5. Normalize PhantomBuster post fields
-        6. Apply the fixed Australia/Brisbane week window
-        7. Deduplicate posts
-        8. Generate post-level summaries with Gemini
-        9. Generate customer-level weekly summaries with Gemini
-       10. Upsert both output tabs
-       11. Record metrics and final processing status
+        2. Load and validate the mapping rows from Google Sheets
+        3. Normalize profile URLs and deduplicate mappings
+        4. Normalize PhantomBuster post fields
+        5. Apply the fixed Australia/Brisbane week window
+        6. Deduplicate posts
+        7. Generate post-level summaries with Gemini
+        8. Generate customer-level weekly summaries with Gemini
+        9. Upsert both output tabs in Google Sheets
+       10. Record metrics and final processing status in logs and Sheets
 ```
 
 The webhook must not perform the full scrape processing synchronously and must
@@ -266,7 +266,6 @@ Deploy the following resources in `australia-southeast1`:
 - Cloud Run service for the webhook and worker;
 - Pub/Sub topic and subscription;
 - Pub/Sub dead-letter topic/subscription;
-- private GCS bucket for raw payloads;
 - Secret Manager secrets;
 - one runtime service account;
 - one Google Sheets workbook.
@@ -276,7 +275,6 @@ Enable the required APIs:
 - Cloud Run;
 - Cloud Build;
 - Pub/Sub;
-- Cloud Storage;
 - Secret Manager;
 - Google Sheets;
 - Google Drive;
@@ -284,7 +282,6 @@ Enable the required APIs:
 
 Use a runtime service account with least-privilege access:
 
-- write objects to the designated GCS bucket;
 - access only the required Secret Manager secrets;
 - publish/consume the required Pub/Sub resources;
 - update the configured Google Sheets workbook.
@@ -292,16 +289,12 @@ Use a runtime service account with least-privilege access:
 Share the workbook with the runtime service account as an editor. Do not use
 downloaded service-account JSON keys.
 
-The GCS bucket must have a lifecycle rule deleting raw payloads after 30 days.
-The bucket should use uniform access and remain private.
-
 ## 8. Secret and configuration values
 
 Configuration must be separated from source code. Expected values include:
 
 ```text
 OUTPUT_SPREADSHEET_ID
-GCS_BUCKET_NAME
 PUBSUB_TOPIC
 PUBSUB_SUBSCRIPTION
 GEMINI_MODEL_NAME=gemini-2.5-flash
@@ -313,3 +306,8 @@ REPORTING_TIMEZONE=Australia/Brisbane
 Store credentials and authentication secrets in Secret Manager. Non-secret
 configuration may be supplied as Cloud Run environment variables.
 
+Google Sheets is the only application data store. The Pub/Sub message may carry
+the webhook payload and job metadata required for processing, but no raw payload
+is archived in GCS or another storage service. Pub/Sub retention and
+dead-letter handling must be configured according to the recovery window needed
+by the deployment.
