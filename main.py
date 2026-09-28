@@ -39,29 +39,33 @@ def webhook(
     except PermissionError as exc:
         raise HTTPException(status_code=401, detail="Unauthorized") from exc
     job_id = str(uuid.uuid4())
+    report_date = datetime.now(timezone.utc).isoformat()
+    message = {
+        "job_id": job_id,
+        "payload": payload,
+        "reporting_date": report_date,
+    }
     try:
-        report_date = datetime.now(timezone.utc).isoformat()
-        PubSubPublisher(settings.pubsub_topic).publish({
-            "job_id": job_id,
-            "payload": payload,
-            "reporting_date": report_date,
-        })
+        settings.validate()
+        if settings.processing_mode == "direct":
+            process_job(message)
+            return {"status": "processed", "job_id": job_id}
+        PubSubPublisher(settings.pubsub_topic).publish(message)
     except Exception as exc:
-        raise HTTPException(status_code=503, detail="Unable to queue webhook job") from exc
+        detail = "Unable to process webhook job" if settings.processing_mode == "direct" else "Unable to queue webhook job"
+        raise HTTPException(status_code=503, detail=detail) from exc
     return {"status": "accepted", "job_id": job_id}
 
 
-def process_pubsub_message(message: dict[str, Any]) -> None:
-    """Worker entry point; cloud wiring is intentionally kept outside the webhook path."""
+def process_job(message: dict[str, Any]) -> None:
+    """Process one job in either direct prototype or Pub/Sub delivery mode."""
     from app.gemini_client import GeminiTextGenerator
-    from app.gcs_store import GCSRawPayloadStore
     from app.processor import process_payload
     from app.sheets_store import SheetsStore
 
     settings = Settings.from_env()
     payload = message["payload"]
     job_id = str(message["job_id"])
-    GCSRawPayloadStore(settings.gcs_bucket_name).save(job_id, payload)
     sheets = SheetsStore(settings.output_spreadsheet_id)
     mappings = sheets.read_customer_info()
     client = GeminiTextGenerator(os.environ["GEMINI_API_KEY"], settings.gemini_model_name)
@@ -71,6 +75,10 @@ def process_pubsub_message(message: dict[str, Any]) -> None:
     sheets.upsert_weekly_summary(weekly_rows)
     if errors:
         print({"job_id": job_id, "processing_errors": errors})
+
+
+def process_pubsub_message(message: dict[str, Any]) -> None:
+    process_job(message)
 
 
 @app.post("/pubsub")
