@@ -31,6 +31,25 @@ class FakeGenerator:
         return json.dumps({"weekly_synthesis": "A concise weekly business summary."})
 
 
+def test_webhook_direct_mode_processes_without_pubsub(monkeypatch: pytest.MonkeyPatch) -> None:
+    import main
+
+    processed: list[dict] = []
+
+    def fake_process_job(message: dict) -> None:
+        processed.append(message)
+
+    monkeypatch.setenv("OUTPUT_SPREADSHEET_ID", "spreadsheet")
+    monkeypatch.setenv("PROCESSING_MODE", "direct")
+    monkeypatch.setenv("WEBHOOK_BEARER_TOKEN", "token")
+    monkeypatch.setattr(main, "process_job", fake_process_job)
+
+    result = main.webhook({"resultObject": []}, authorization="Bearer token")
+
+    assert result["status"] == "processed"
+    assert processed[0]["payload"] == {"resultObject": []}
+
+
 def test_reporting_window_uses_monday_to_sunday_in_brisbane() -> None:
     window = reporting_window(datetime(2026, 9, 20, 13, 59, tzinfo=timezone.utc))
     assert window.week_start == "2026-09-14"

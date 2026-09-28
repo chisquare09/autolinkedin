@@ -7,9 +7,9 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class Settings:
     output_spreadsheet_id: str
-    gcs_bucket_name: str
     pubsub_topic: str
     pubsub_subscription: str
+    processing_mode: str
     gemini_model_name: str
     reporting_timezone: str
     webhook_auth_mode: str
@@ -20,9 +20,9 @@ class Settings:
     def from_env(cls) -> "Settings":
         return cls(
             output_spreadsheet_id=os.getenv("OUTPUT_SPREADSHEET_ID", ""),
-            gcs_bucket_name=os.getenv("GCS_BUCKET_NAME", ""),
             pubsub_topic=os.getenv("PUBSUB_TOPIC", ""),
             pubsub_subscription=os.getenv("PUBSUB_SUBSCRIPTION", ""),
+            processing_mode=os.getenv("PROCESSING_MODE", "pubsub"),
             gemini_model_name=os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash"),
             reporting_timezone=os.getenv("REPORTING_TIMEZONE", "Australia/Brisbane"),
             webhook_auth_mode=os.getenv("WEBHOOK_AUTH_MODE", "bearer"),
@@ -33,9 +33,11 @@ class Settings:
     def validate(self) -> None:
         required = {
             "OUTPUT_SPREADSHEET_ID": self.output_spreadsheet_id,
-            "GCS_BUCKET_NAME": self.gcs_bucket_name,
-            "PUBSUB_TOPIC": self.pubsub_topic,
         }
+        if self.processing_mode == "pubsub":
+            required["PUBSUB_TOPIC"] = self.pubsub_topic
+        elif self.processing_mode != "direct":
+            raise ValueError("PROCESSING_MODE must be 'pubsub' or 'direct'")
         missing = [name for name, value in required.items() if not value]
         if missing:
             raise ValueError(f"Missing required configuration: {', '.join(missing)}")

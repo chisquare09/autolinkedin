@@ -27,9 +27,13 @@ Application Default Credentials when deployed.
   a durable Pub/Sub job.
 - `POST /pubsub` accepts a Pub/Sub push envelope and processes a queued job.
 
-The production worker archives the raw payload in private GCS, reads the
-`customer_info` sheet, summarizes qualifying posts with Gemini, and upserts
-`post_details` and `weekly_summary`.
+Set `PROCESSING_MODE=direct` for a short-lived prototype deployment without
+Pub/Sub. In direct mode, `/webhook` processes the payload synchronously and
+returns only after Gemini and Sheets processing complete. The default
+`PROCESSING_MODE=pubsub` remains the production path.
+
+The worker reads the job payload, loads the `customer_info` sheet, summarizes
+qualifying posts with Gemini, and upserts `post_details` and `weekly_summary`.
 
 ## Configuration
 
@@ -37,8 +41,7 @@ Required runtime configuration includes:
 
 ```text
 OUTPUT_SPREADSHEET_ID
-GCS_BUCKET_NAME
-PUBSUB_TOPIC
+PROCESSING_MODE=direct
 GEMINI_API_KEY
 WEBHOOK_AUTH_MODE=bearer
 WEBHOOK_BEARER_TOKEN
@@ -54,3 +57,7 @@ service-account key files.
 The scripts under `scripts/` create the basic Google Cloud resources and deploy
 the container. Review the generated IAM bindings and configure authenticated
 Pub/Sub push delivery before production use.
+
+For a quota-limited prototype without Pub/Sub, use
+`scripts/deploy-direct.sh` with `PROCESSING_MODE=direct`. Direct mode processes
+the webhook synchronously and should only be used for a few manual tests.
