@@ -14,7 +14,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --region "$REGION" \
   --project "$PROJECT_ID" \
   --service-account "$SERVICE_ACCOUNT" \
-  --set-env-vars "PUBSUB_TOPIC=$PUBSUB_TOPIC,GCS_BUCKET_NAME=$GCS_BUCKET_NAME,OUTPUT_SPREADSHEET_ID=$OUTPUT_SPREADSHEET_ID,REPORTING_TIMEZONE=Australia/Brisbane,GEMINI_MODEL_NAME=gemini-2.5-flash" \
+  --set-env-vars "PUBSUB_TOPIC=$PUBSUB_TOPIC,GCS_BUCKET_NAME=$GCS_BUCKET_NAME,OUTPUT_SPREADSHEET_ID=$OUTPUT_SPREADSHEET_ID,REPORTING_TIMEZONE=Australia/Brisbane,GEMINI_MODEL_NAME=gemini-3.8-flash" \
   --cpu-throttling \
   --memory 1Gi \
   --cpu 1 \
