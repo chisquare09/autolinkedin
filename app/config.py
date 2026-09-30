@@ -23,7 +23,7 @@ class Settings:
             pubsub_topic=os.getenv("PUBSUB_TOPIC", ""),
             pubsub_subscription=os.getenv("PUBSUB_SUBSCRIPTION", ""),
             processing_mode=os.getenv("PROCESSING_MODE", "pubsub"),
-            gemini_model_name=os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash"),
+            gemini_model_name=os.getenv("GEMINI_MODEL_NAME", "gemini-3.8-flash"),
             reporting_timezone=os.getenv("REPORTING_TIMEZONE", "Australia/Brisbane"),
             webhook_auth_mode=os.getenv("WEBHOOK_AUTH_MODE", "bearer"),
             webhook_bearer_token=os.getenv("WEBHOOK_BEARER_TOKEN", ""),

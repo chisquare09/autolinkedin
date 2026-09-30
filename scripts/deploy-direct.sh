@@ -12,7 +12,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --source . \
   --region "$REGION" \
   --project "$PROJECT_ID" \
-  --set-env-vars "OUTPUT_SPREADSHEET_ID=$OUTPUT_SPREADSHEET_ID,PROCESSING_MODE=direct,REPORTING_TIMEZONE=Australia/Brisbane,GEMINI_MODEL_NAME=gemini-2.5-flash,WEBHOOK_AUTH_MODE=bearer" \
+  --set-env-vars "OUTPUT_SPREADSHEET_ID=$OUTPUT_SPREADSHEET_ID,PROCESSING_MODE=direct,REPORTING_TIMEZONE=Australia/Brisbane,GEMINI_MODEL_NAME=gemini-3.8-flash,MAX_POSTS_PER_GEMINI_REQUEST=10,WEBHOOK_AUTH_MODE=bearer" \
   --set-secrets "GEMINI_API_KEY=$GEMINI_API_KEY_SECRET:latest,WEBHOOK_BEARER_TOKEN=$WEBHOOK_BEARER_TOKEN_SECRET:latest" \
   --memory 1Gi \
   --cpu 1 \
