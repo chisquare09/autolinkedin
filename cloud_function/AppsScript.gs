@@ -1,14 +1,14 @@
 /*
- * Google Sheets launcher for the direct Cloud Run Function prototype.
+ * Google Sheets launcher for the summarization Cloud Run Function.
  *
  * Before use:
- * 1. Set CLOUD_RUN_FUNCTION_URL below to the deployed function URL.
+ * 1. Set SUMMARIZATION_FUNCTION_URL below to the summarize_function URL.
  * 2. Add WEBHOOK_BEARER_TOKEN in Apps Script:
  *    Project Settings -> Script properties.
  * 3. Keep the phantom_result headers aligned with PhantomBuster's JSON fields.
  */
 
-const CLOUD_RUN_FUNCTION_URL = 'https://YOUR-CLOUD-RUN-FUNCTION-URL';
+const SUMMARIZATION_FUNCTION_URL = 'https://YOUR-SUMMARIZATION-FUNCTION-URL';
 const RAW_RESULTS_SHEET = 'phantom_result';
 const CUSTOMER_INFO_SHEET = 'customer_info';
 const WEBHOOK_TOKEN_PROPERTY = 'WEBHOOK_BEARER_TOKEN';
@@ -55,7 +55,7 @@ function runWeeklyProcessing() {
       );
     }
 
-    const response = UrlFetchApp.fetch(CLOUD_RUN_FUNCTION_URL, {
+    const response = UrlFetchApp.fetch(SUMMARIZATION_FUNCTION_URL, {
       method: 'post',
       contentType: 'application/json',
       headers: {

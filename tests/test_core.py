@@ -21,11 +21,13 @@ FIXTURE = json.loads(Path("fixtures/phantombuster_payload.json").read_text())
 class FakeGenerator:
     def __init__(self) -> None:
         self.prompts: list[str] = []
+        self.system_instructions: list[str] = []
 
-    def generate(self, prompt: str) -> str:
-        self.prompts.append(prompt)
-        if '"summaries"' in prompt:
-            posts_json = prompt.split("Posts: ", 1)[1]
+    def generate(self, contents: str, system_instruction: str = "") -> str:
+        self.prompts.append(contents)
+        self.system_instructions.append(system_instruction)
+        if '"summaries"' in contents:
+            posts_json = contents.split("Input posts:\n", 1)[1]
             count = len(json.loads(posts_json))
             return json.dumps({"summaries": [{"index": i, "summary": f"Summary {i}"} for i in range(1, count + 1)]})
         return json.dumps({"weekly_synthesis": "A concise weekly business summary."})
