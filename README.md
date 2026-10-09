@@ -65,17 +65,24 @@ the webhook synchronously and should only be used for a few manual tests.
 
 ## Cloud Run function prototype
 
-The `cloud_function/` directory is a standalone, direct-processing prototype
-for the Cloud Run function deployment option. Upload only these two files from
-that directory:
+The `cloud_function/` directory contains two independently deployable Cloud
+Run functions. Each function is self-contained and has its own dependencies:
 
 ```text
-main.py
-requirements.txt
+phantom_function/
+  main.py
+  requirements.txt
+summarize_function/
+  main.py
+  requirements.txt
 ```
 
-Set the function entry point to `phantom_webhook`, runtime to Python 3.11 or
-later, and configure these environment variables:
+Deploy `cloud_function/phantom_function` with the function entry point
+`phantom_webhook`. Configure PhantomBuster to call this function. Deploy
+`cloud_function/summarize_function` with the function entry point
+`summarization_webhook`, and configure Apps Script to call this function.
+Both functions use Python 3.11 or later and require the environment variables
+listed below:
 
 ```text
 OUTPUT_SPREADSHEET_ID
@@ -86,17 +93,18 @@ MAX_POSTS_PER_GEMINI_REQUEST=10
 REPORTING_TIMEZONE=Australia/Brisbane
 ```
 
-The function handles `POST /webhook` directly and writes to Google Sheets
-without Pub/Sub. It also responds to `GET /health` when the deployment
-platform preserves the request path. This is intentionally a prototype
-deviation from the production plan: the modular application and Pub/Sub path
-remain the production implementation.
+The ingestion function handles `POST /webhook` directly and writes Phantom
+results to the `phantom_result` sheet without invoking Gemini. The
+summarization function handles `POST /webhook` directly, reads
+`phantom_result`, skips already summarized post keys, invokes Gemini, and
+writes the processed output tabs. Both functions respond to `GET /health` when
+the deployment platform preserves the request path.
 
-The function supports two direct-mode actions. PhantomBuster sends its normal
-result payload (or an `action` of `ingest_results`) to append/upsert raw rows in
-`phantom_result`. The Apps Script menu sends `action=process_week`; the function
-then reads `phantom_result`, skips already summarized post keys, and writes the
-processed output tabs.
+PhantomBuster sends its normal result payload (or an `action` of
+`ingest_results`) to the ingestion function. The Apps Script menu sends
+`action=process_week` to the summarization function. This preserves the
+prototype's direct-processing behavior while keeping ingestion and
+summarization in separate deployments.
 The processing action scans all raw rows, summarizes only post keys that are not
 already present in `post_details`, and assigns each new post to the week derived
 from its timestamp. This allows one button click to backfill older weeks without

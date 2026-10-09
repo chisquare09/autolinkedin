@@ -13,7 +13,13 @@ gcloud config set project "$PROJECT_ID"
 gcloud services enable run.googleapis.com pubsub.googleapis.com storage.googleapis.com secretmanager.googleapis.com sheets.googleapis.com drive.googleapis.com
 gcloud pubsub topics create "$PUBSUB_TOPIC" 2>/dev/null || true
 gcloud pubsub topics create "$DLQ_TOPIC" 2>/dev/null || true
-gcloud pubsub subscriptions create "$PUBSUB_SUBSCRIPTION" --topic="$PUBSUB_TOPIC" 2>/dev/null || true
+gcloud pubsub subscriptions create "$PUBSUB_SUBSCRIPTION" \
+  --topic="$PUBSUB_TOPIC" \
+  --dead-letter-topic="$DLQ_TOPIC" \
+  --max-delivery-attempts=3 2>/dev/null || true
+gcloud pubsub subscriptions update "$PUBSUB_SUBSCRIPTION" \
+  --dead-letter-topic="$DLQ_TOPIC" \
+  --max-delivery-attempts=3
 gcloud storage buckets create "gs://$BUCKET_NAME" --location="$REGION" --uniform-bucket-level-access 2>/dev/null || true
 cat > /tmp/gcs-lifecycle.json <<'JSON'
 {"rule":[{"action":{"type":"Delete"},"condition":{"age":30}}]}
