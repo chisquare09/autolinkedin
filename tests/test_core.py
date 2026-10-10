@@ -21,14 +21,35 @@ FIXTURE = json.loads(Path("fixtures/phantombuster_payload.json").read_text())
 class FakeGenerator:
     def __init__(self) -> None:
         self.prompts: list[str] = []
+        self.system_instructions: list[str] = []
 
-    def generate(self, prompt: str) -> str:
-        self.prompts.append(prompt)
-        if '"summaries"' in prompt:
-            posts_json = prompt.split("Posts: ", 1)[1]
+    def generate(self, contents: str, system_instruction: str = "") -> str:
+        self.prompts.append(contents)
+        self.system_instructions.append(system_instruction)
+        if '"summaries"' in contents:
+            posts_json = contents.split("Input posts:\n", 1)[1]
             count = len(json.loads(posts_json))
             return json.dumps({"summaries": [{"index": i, "summary": f"Summary {i}"} for i in range(1, count + 1)]})
         return json.dumps({"weekly_synthesis": "A concise weekly business summary."})
+
+
+def test_webhook_direct_mode_processes_without_pubsub(monkeypatch: pytest.MonkeyPatch) -> None:
+    import main
+
+    processed: list[dict] = []
+
+    def fake_process_job(message: dict) -> None:
+        processed.append(message)
+
+    monkeypatch.setenv("OUTPUT_SPREADSHEET_ID", "spreadsheet")
+    monkeypatch.setenv("PROCESSING_MODE", "direct")
+    monkeypatch.setenv("WEBHOOK_BEARER_TOKEN", "token")
+    monkeypatch.setattr(main, "process_job", fake_process_job)
+
+    result = main.webhook({"resultObject": []}, authorization="Bearer token")
+
+    assert result["status"] == "processed"
+    assert processed[0]["payload"] == {"resultObject": []}
 
 
 def test_reporting_window_uses_monday_to_sunday_in_brisbane() -> None:
