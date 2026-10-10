@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 *.pyc
 .env
+service-account.json
 cloud_function/*.json
 *.tmp
 note.txt
