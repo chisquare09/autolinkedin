@@ -45,7 +45,7 @@ The system must use the reporting period stored on the job rather than calculati
 | AI tone | Executive-neutral |
 | Per-post summary | Maximum three sentences |
 | Customer weekly summary | Maximum 100 words |
-| Gemini model | Configurable; initial value `gemini-2.5-flash` |
+| Gemini model | Configurable; initial value `gemini-3.8-flash` |
 | GCP region | `australia-southeast1` |
 | Deployment | Versioned `gcloud` scripts |
 | CI/CD | Deferred |
@@ -297,7 +297,7 @@ Configuration must be separated from source code. Expected values include:
 OUTPUT_SPREADSHEET_ID
 PUBSUB_TOPIC
 PUBSUB_SUBSCRIPTION
-GEMINI_MODEL_NAME=gemini-2.5-flash
+GEMINI_MODEL_NAME=gemini-3.8-flash
 WEBHOOK_AUTH_MODE
 WEBHOOK_BEARER_TOKEN or WEBHOOK_SECRET
 REPORTING_TIMEZONE=Australia/Brisbane
@@ -305,9 +305,3 @@ REPORTING_TIMEZONE=Australia/Brisbane
 
 Store credentials and authentication secrets in Secret Manager. Non-secret
 configuration may be supplied as Cloud Run environment variables.
-
-Google Sheets is the only application data store. The Pub/Sub message may carry
-the webhook payload and job metadata required for processing, but no raw payload
-is archived in GCS or another storage service. Pub/Sub retention and
-dead-letter handling must be configured according to the recovery window needed
-by the deployment.

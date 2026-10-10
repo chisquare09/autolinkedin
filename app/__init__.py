@@ -1,1 +1,0 @@
-"""LinkedIn activity processing application."""

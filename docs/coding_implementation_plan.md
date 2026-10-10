@@ -39,7 +39,7 @@ The worker must be safe to run more than once.
 Use a configurable Gemini Flash model, initially:
 
 ```text
-gemini-2.5-flash
+gemini-3.8-flash
 ```
 
 For each post, provide only the normalized post content and relevant metadata
