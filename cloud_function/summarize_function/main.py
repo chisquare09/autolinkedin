@@ -501,9 +501,28 @@ def request_reporting_date(payload: dict[str, Any]) -> datetime:
         raise ValueError("reporting_date is not valid ISO-8601") from exc
 
 
+def request_date_range(payload: dict[str, Any]) -> tuple[str | None, str | None]:
+    start_date = payload.get("start_date")
+    end_date = payload.get("end_date")
+    if start_date is None and end_date is None:
+        return None, None
+    if not isinstance(start_date, str) or not isinstance(end_date, str):
+        raise ValueError("start_date and end_date must be ISO dates")
+    try:
+        parsed_start = date.fromisoformat(start_date)
+        parsed_end = date.fromisoformat(end_date)
+    except ValueError as exc:
+        raise ValueError("start_date and end_date must be valid ISO dates") from exc
+    if parsed_start > parsed_end:
+        raise ValueError("start_date must be on or before end_date")
+    return parsed_start.isoformat(), parsed_end.isoformat()
+
+
 def process_payload(
     payload: dict[str, Any],
     reporting_date: datetime | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> dict[str, Any]:
     timezone_name = env("REPORTING_TIMEZONE", "Australia/Brisbane")
     spreadsheet_id = env("OUTPUT_SPREADSHEET_ID")
@@ -514,7 +533,7 @@ def process_payload(
     mapping_rows = rows_as_dicts(mapping_sheet)
     mappings = deduplicate_mappings(mapping_rows)
     posts, errors = normalize_posts(
-        payload, mappings, timezone_name
+        payload, mappings, timezone_name, start_date, end_date
     )
     post_sheet = worksheet(book, "post_details", POST_HEADERS)
     existing_post_rows = rows_as_dicts(post_sheet)
@@ -657,7 +676,13 @@ def summarization_webhook(request: Request):
             payload = payload_from_raw_sheet(book)
         if not isinstance(payload, dict):
             raise ValueError("payload must be a JSON object")
-        result = process_payload(payload, request_reporting_date(request_payload))
+        start_date, end_date = request_date_range(request_payload)
+        result = process_payload(
+            payload,
+            request_reporting_date(request_payload),
+            start_date,
+            end_date,
+        )
     except (ValueError, RuntimeError, KeyError, json.JSONDecodeError) as exc:
         return jsonify({
             "detail": "Processing failed",
