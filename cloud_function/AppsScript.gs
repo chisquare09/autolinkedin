@@ -16,7 +16,7 @@ const WEBHOOK_TOKEN_PROPERTY = 'WEBHOOK_BEARER_TOKEN';
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('LinkedIn Automation')
-    .addItem('Run weekly processing', 'runWeeklyProcessing')
+    .addItem('Weekly Summarize', 'runWeeklyProcessing')
     .addToUi();
 }
 
