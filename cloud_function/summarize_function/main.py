@@ -217,24 +217,39 @@ def normalize_posts(
     timezone_name: str,
     week_start: str | None = None,
     week_end: str | None = None,
-) -> tuple[list[dict[str, Any]], list[str]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     by_url = {row["linkedin_profile_url"]: row for row in mappings}
     posts: list[dict[str, Any]] = []
-    errors: list[str] = []
+    errors: list[dict[str, str]] = []
+
+    def add_error(message: str, profile_url: str = "") -> None:
+        mapping = by_url.get(profile_url)
+        errors.append({
+            "customer_name": mapping["customer_name"] if mapping else "",
+            "profile_url": profile_url,
+            "message": message,
+        })
+
     seen: set[tuple[str, str, str]] = set()
     for raw in parse_result_object(payload):
-        if raw.get("error"):
-            errors.append(str(raw["error"]))
-            continue
         profile_raw = raw.get("profileUrl") or raw.get("authorUrl") or raw.get("url")
+        profile_url = ""
+        if profile_raw:
+            try:
+                profile_url = normalize_profile_url(str(profile_raw))
+            except ValueError:
+                profile_url = ""
+        if raw.get("error"):
+            add_error(str(raw["error"]), profile_url)
+            continue
         try:
             profile_url = normalize_profile_url(str(profile_raw or ""))
         except ValueError as exc:
-            errors.append(str(exc))
+            add_error(str(exc))
             continue
         mapping = by_url.get(profile_url)
         if mapping is None:
-            errors.append(f"profile is not in customer_info: {profile_url}")
+            add_error(f"profile is not in customer_info: {profile_url}", profile_url)
             continue
         try:
             post_date = select_post_date(raw, timezone_name)
@@ -245,12 +260,12 @@ def normalize_posts(
             ):
                 continue
         except ValueError as exc:
-            errors.append(str(exc))
+            add_error(str(exc), profile_url)
             continue
         post_url = str(raw.get("postUrl") or raw.get("sharedPostUrl") or "").strip()
         content = str(raw.get("postContent") or raw.get("textContent") or "").strip()
         if not post_url or not content:
-            errors.append(f"post missing URL or content for {profile_url}")
+            add_error(f"post missing URL or content for {profile_url}", profile_url)
             continue
         post = {
             "customer_name": mapping["customer_name"],
@@ -518,6 +533,29 @@ def request_date_range(payload: dict[str, Any]) -> tuple[str | None, str | None]
     return parsed_start.isoformat(), parsed_end.isoformat()
 
 
+def week_starts_in_range(
+    start_date: str | None,
+    end_date: str | None,
+    reporting_date: datetime | None,
+    timezone_name: str,
+) -> list[str]:
+    if start_date is None or end_date is None:
+        week_start, _ = reporting_window(
+            reporting_date or datetime.now(timezone.utc),
+            timezone_name,
+        )
+        return [week_start]
+    first = date.fromisoformat(start_date)
+    last = date.fromisoformat(end_date)
+    current = first - timedelta(days=first.weekday())
+    final = last - timedelta(days=last.weekday())
+    result = []
+    while current <= final:
+        result.append(current.isoformat())
+        current += timedelta(days=7)
+    return result
+
+
 def process_payload(
     payload: dict[str, Any],
     reporting_date: datetime | None = None,
@@ -535,6 +573,12 @@ def process_payload(
     posts, errors = normalize_posts(
         payload, mappings, timezone_name, start_date, end_date
     )
+    error_messages = list(dict.fromkeys(error["message"] for error in errors))
+    errors_by_customer: dict[str, list[str]] = defaultdict(list)
+    for error in errors:
+        customer = error["customer_name"]
+        if customer and error["message"] not in errors_by_customer[customer]:
+            errors_by_customer[customer].append(error["message"])
     post_sheet = worksheet(book, "post_details", POST_HEADERS)
     existing_post_rows = rows_as_dicts(post_sheet)
     existing_post_keys = {post_key(row) for row in existing_post_rows}
@@ -585,6 +629,17 @@ def process_payload(
         for row in existing_weekly_rows
     }
     changed_weeks = set(new_posts_by_week)
+    affected_week_keys = {
+        (customer, week_start)
+        for customer in errors_by_customer
+        for week_start in week_starts_in_range(
+            start_date,
+            end_date,
+            reporting_date,
+            timezone_name,
+        )
+    }
+    changed_weeks.update(affected_week_keys)
     weekly_rows = []
     for key in sorted(changed_weeks):
         customer, week_start = key
@@ -593,15 +648,23 @@ def process_payload(
         ).isoformat()
         prior = existing_weekly.get(key)
         customer_posts = by_customer_week[key]
+        has_scraping_error = customer in errors_by_customer
+        if has_scraping_error and not customer_posts:
+            synthesis = (
+                "Scraping failed for one or more mapped profiles; "
+                "activity coverage is incomplete."
+            )
+        else:
+            synthesis = weekly_summary(customer, customer_posts)
         weekly_rows.append({
             "customer_name": customer,
             "week_start": week_start,
             "week_end": week_end,
             "post_count": len(customer_posts),
-            "weekly_synthesis": weekly_summary(customer, customer_posts),
+            "weekly_synthesis": synthesis,
             "processed_at": processed_at,
-            "processing_status": "partial" if errors else "processed",
-            "processing_error": "; ".join(errors),
+            "processing_status": "partial" if has_scraping_error else "processed",
+            "processing_error": "; ".join(errors_by_customer.get(customer, [])),
         })
     upsert(post_sheet, POST_HEADERS, post_rows,
            ["customer_name", "linkedin_profile_url", "post_url"])
@@ -611,7 +674,7 @@ def process_payload(
         "post_count": len(posts),
         "new_post_count": len(new_posts),
         "customer_count": len(weekly_rows),
-        "processing_errors": errors,
+        "processing_errors": error_messages,
         "processed_weeks": sorted({row["week_start"] for row in weekly_rows}),
     }
 
@@ -684,6 +747,12 @@ def summarization_webhook(request: Request):
             end_date,
         )
     except (ValueError, RuntimeError, KeyError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Summarization processing failed; job_id=%s error_type=%s error=%s",
+            job_id,
+            type(exc).__name__,
+            str(exc),
+        )
         return jsonify({
             "detail": "Processing failed",
             "job_id": job_id,

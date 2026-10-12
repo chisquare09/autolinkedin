@@ -106,6 +106,21 @@ function runWeeklyProcessing() {
       );
     }
 
+    let result;
+    try {
+      result = JSON.parse(body);
+    } catch (error) {
+      showMessage('Weekly processing completed:\n\n' + body);
+      return;
+    }
+
+    if (result.processing_errors && result.processing_errors.length > 0) {
+      showMessage(
+        'Weekly processing completed with coverage warnings:\n\n' + body
+      );
+      return;
+    }
+
     showMessage('Weekly processing completed:\n\n' + body);
   } finally {
     lock.releaseLock();
@@ -113,7 +128,15 @@ function runWeeklyProcessing() {
 }
 
 function isIsoDate(value) {
-  return /^\d{4}-\d{2}-\d{2}$/.test(value);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return false;
+  }
+
+  const parts = value.split('-').map(Number);
+  const parsed = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+  return parsed.getUTCFullYear() === parts[0]
+    && parsed.getUTCMonth() === parts[1] - 1
+    && parsed.getUTCDate() === parts[2];
 }
 
 function readRowsAsObjects(sheet) {

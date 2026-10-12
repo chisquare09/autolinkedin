@@ -217,24 +217,39 @@ def normalize_posts(
     timezone_name: str,
     week_start: str | None = None,
     week_end: str | None = None,
-) -> tuple[list[dict[str, Any]], list[str]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     by_url = {row["linkedin_profile_url"]: row for row in mappings}
     posts: list[dict[str, Any]] = []
-    errors: list[str] = []
+    errors: list[dict[str, str]] = []
+
+    def add_error(message: str, profile_url: str = "") -> None:
+        mapping = by_url.get(profile_url)
+        errors.append({
+            "customer_name": mapping["customer_name"] if mapping else "",
+            "profile_url": profile_url,
+            "message": message,
+        })
+
     seen: set[tuple[str, str, str]] = set()
     for raw in parse_result_object(payload):
-        if raw.get("error"):
-            errors.append(str(raw["error"]))
-            continue
         profile_raw = raw.get("profileUrl") or raw.get("authorUrl") or raw.get("url")
+        profile_url = ""
+        if profile_raw:
+            try:
+                profile_url = normalize_profile_url(str(profile_raw))
+            except ValueError:
+                profile_url = ""
+        if raw.get("error"):
+            add_error(str(raw["error"]), profile_url)
+            continue
         try:
             profile_url = normalize_profile_url(str(profile_raw or ""))
         except ValueError as exc:
-            errors.append(str(exc))
+            add_error(str(exc))
             continue
         mapping = by_url.get(profile_url)
         if mapping is None:
-            errors.append(f"profile is not in customer_info: {profile_url}")
+            add_error(f"profile is not in customer_info: {profile_url}", profile_url)
             continue
         try:
             post_date = select_post_date(raw, timezone_name)
@@ -245,12 +260,12 @@ def normalize_posts(
             ):
                 continue
         except ValueError as exc:
-            errors.append(str(exc))
+            add_error(str(exc), profile_url)
             continue
         post_url = str(raw.get("postUrl") or raw.get("sharedPostUrl") or "").strip()
         content = str(raw.get("postContent") or raw.get("textContent") or "").strip()
         if not post_url or not content:
-            errors.append(f"post missing URL or content for {profile_url}")
+            add_error(f"post missing URL or content for {profile_url}", profile_url)
             continue
         post = {
             "customer_name": mapping["customer_name"],
@@ -582,7 +597,9 @@ def process_payload(
             "weekly_synthesis": weekly_summary(customer, customer_posts),
             "processed_at": processed_at,
             "processing_status": "partial" if errors else "processed",
-            "processing_error": "; ".join(errors),
+            "processing_error": "; ".join(
+                dict.fromkeys(error["message"] for error in errors)
+            ),
         })
     upsert(post_sheet, POST_HEADERS, post_rows,
            ["customer_name", "linkedin_profile_url", "post_url"])
@@ -650,6 +667,12 @@ def phantom_webhook(request: Request):
             raise ValueError("action must be 'ingest_results'")
         result = ingest_results(request_payload)
     except (ValueError, RuntimeError, KeyError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Ingestion processing failed; job_id=%s error_type=%s error=%s",
+            job_id,
+            type(exc).__name__,
+            str(exc),
+        )
         return jsonify({
             "detail": "Processing failed",
             "job_id": job_id,
