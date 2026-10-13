@@ -352,7 +352,7 @@ def summarize_posts(posts: list[dict[str, Any]]) -> list[str]:
         raise ValueError("MAX_POSTS_PER_GEMINI_REQUEST must be at least 1")
     summaries: list[str] = []
     for post_batch in batches(posts, batch_size):
-        contents = (
+        base_contents = (
             "Return valid JSON exactly in this shape:\n"
             '{"summaries":[{"index":1,"summary":"..."}]}\n'
             "The number of summaries must exactly match the number of input posts. "
@@ -364,19 +364,43 @@ def summarize_posts(posts: list[dict[str, Any]]) -> list[str]:
                 ensure_ascii=False,
             )
         )
-        rows = gemini_json(contents, POST_SUMMARY_SYSTEM_INSTRUCTION).get("summaries")
-        if not isinstance(rows, list) or len(rows) != len(post_batch):
-            raise ValueError("Gemini returned an invalid post summary count")
-        by_index: dict[int, str] = {}
-        for row in rows:
-            if not isinstance(row, dict) or not isinstance(row.get("index"), int):
-                raise ValueError("Gemini returned an invalid post summary")
-            summary = row.get("summary")
-            if not isinstance(summary, str) or not summary.strip():
-                raise ValueError("Gemini returned an empty post summary")
-            if sentence_count(summary.strip()) > 3:
-                raise ValueError("a post summary exceeds three sentences")
-            by_index[row["index"]] = summary.strip()
+        by_index: dict[int, str] | None = None
+        validation_error: ValueError | None = None
+        for validation_attempt in range(2):
+            contents = base_contents
+            if validation_attempt:
+                contents += (
+                    "\nYour previous response failed validation. Regenerate every "
+                    "summary and strictly use no more than three sentences per post."
+                )
+            try:
+                rows = gemini_json(
+                    contents,
+                    POST_SUMMARY_SYSTEM_INSTRUCTION,
+                ).get("summaries")
+                if not isinstance(rows, list) or len(rows) != len(post_batch):
+                    raise ValueError("Gemini returned an invalid post summary count")
+                candidate: dict[int, str] = {}
+                for row in rows:
+                    if not isinstance(row, dict) or not isinstance(row.get("index"), int):
+                        raise ValueError("Gemini returned an invalid post summary")
+                    summary = row.get("summary")
+                    if not isinstance(summary, str) or not summary.strip():
+                        raise ValueError("Gemini returned an empty post summary")
+                    if sentence_count(summary.strip()) > 3:
+                        raise ValueError("a post summary exceeds three sentences")
+                    candidate[row["index"]] = summary.strip()
+                by_index = candidate
+                break
+            except ValueError as exc:
+                validation_error = exc
+                if validation_attempt == 0:
+                    logger.warning(
+                        "Gemini summary failed validation; requesting one correction: %s",
+                        str(exc),
+                    )
+        if by_index is None:
+            raise validation_error or ValueError("Gemini summary validation failed")
         if set(by_index) != set(range(1, len(post_batch) + 1)):
             raise ValueError("Gemini returned invalid post summary indexes")
         summaries.extend(by_index[index] for index in range(1, len(post_batch) + 1))

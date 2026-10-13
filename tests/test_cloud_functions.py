@@ -107,6 +107,35 @@ def test_date_range_validation_rejects_invalid_and_reversed_dates(modules) -> No
         })
 
 
+def test_post_summary_retries_once_when_sentence_limit_is_exceeded(modules, monkeypatch) -> None:
+    _, summarize = modules
+    responses = iter([
+        {"summaries": [{
+            "index": 1,
+            "summary": "First sentence. Second sentence. Third sentence. Fourth sentence.",
+        }]},
+        {"summaries": [{
+            "index": 1,
+            "summary": "First sentence. Second sentence.",
+        }]},
+    ])
+    calls = []
+
+    def fake_gemini(contents, system_instruction):
+        calls.append(contents)
+        return next(responses)
+
+    monkeypatch.setattr(summarize, "gemini_json", fake_gemini)
+    result = summarize.summarize_posts([{
+        "post_date": "2026-10-06T01:00:00Z",
+        "post_content": "Post content",
+    }])
+
+    assert result == ["First sentence. Second sentence."]
+    assert len(calls) == 2
+    assert "previous response failed validation" in calls[1]
+
+
 def test_weekly_error_status_is_customer_specific(modules, monkeypatch) -> None:
     _, summarize = modules
 
