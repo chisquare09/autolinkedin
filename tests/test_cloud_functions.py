@@ -112,17 +112,23 @@ def test_post_summary_retries_once_when_sentence_limit_is_exceeded(modules, monk
     responses = iter([
         {"summaries": [{
             "index": 1,
-            "summary": "First sentence. Second sentence. Third sentence. Fourth sentence.",
+            "sentences": [
+                "First sentence.",
+                "Second sentence.",
+                "Third sentence.",
+                "Fourth sentence.",
+            ],
         }]},
         {"summaries": [{
             "index": 1,
-            "summary": "First sentence. Second sentence.",
+            "sentences": ["First sentence.", "Second sentence."],
         }]},
     ])
     calls = []
 
-    def fake_gemini(contents, system_instruction):
+    def fake_gemini(contents, system_instruction, response_schema):
         calls.append(contents)
+        assert response_schema == summarize.POST_SUMMARY_RESPONSE_SCHEMA
         return next(responses)
 
     monkeypatch.setattr(summarize, "gemini_json", fake_gemini)
@@ -134,6 +140,28 @@ def test_post_summary_retries_once_when_sentence_limit_is_exceeded(modules, monk
     assert result == ["First sentence. Second sentence."]
     assert len(calls) == 2
     assert "previous response failed validation" in calls[1]
+
+
+def test_post_summary_rejects_repeated_invalid_sentence_arrays(
+    modules, monkeypatch
+) -> None:
+    _, summarize = modules
+    response = {"summaries": [{
+        "index": 1,
+        "sentences": [
+            "First sentence.",
+            "Second sentence.",
+            "Third sentence.",
+            "Fourth sentence.",
+        ],
+    }]}
+    monkeypatch.setattr(summarize, "gemini_json", lambda *_args: response)
+
+    with pytest.raises(ValueError, match="invalid post sentence array"):
+        summarize.summarize_posts([{
+            "post_date": "2026-10-06T01:00:00Z",
+            "post_content": "Post content",
+        }])
 
 
 def test_weekly_error_status_is_customer_specific(modules, monkeypatch) -> None:

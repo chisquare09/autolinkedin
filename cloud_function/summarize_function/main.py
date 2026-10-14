@@ -48,7 +48,10 @@ FACTUALITY AND SAFETY
 - Do not invent facts, motivations, results, sentiment, or business impact.
 
 LENGTH
-- Use no more than three sentences per post.
+- Use one to three complete sentences per post.
+- Each sentence must be a separate item in the required `sentences` array.
+- Do not truncate a sentence or omit an important fact merely to satisfy the
+  limit; prioritize the main subject, key facts, and outcome.
 """.strip()
 
 
@@ -104,6 +107,26 @@ RAW_HEADERS = [
     "action", "authorUrl", "viewCount", "postTimestamp", "videoUrl",
     "sharedPostUrl", "sharedJobUrl",
 ]
+POST_SUMMARY_RESPONSE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "summaries": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "index": {"type": "INTEGER"},
+                    "sentences": {
+                        "type": "ARRAY",
+                        "items": {"type": "STRING"},
+                    },
+                },
+                "required": ["index", "sentences"],
+            },
+        },
+    },
+    "required": ["summaries"],
+}
 
 
 def env(name: str, default: str = "") -> str:
@@ -306,7 +329,11 @@ def batches(
     ]
 
 
-def gemini_json(contents: str, system_instruction: str = "") -> dict[str, Any]:
+def gemini_json(
+    contents: str,
+    system_instruction: str = "",
+    response_schema: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     api_key = env("GEMINI_API_KEY")
     if not api_key:
         raise ValueError("GEMINI_API_KEY is required")
@@ -320,6 +347,7 @@ def gemini_json(contents: str, system_instruction: str = "") -> dict[str, Any]:
                 config={
                     "response_mime_type": "application/json",
                     "system_instruction": system_instruction,
+                    **({"response_schema": response_schema} if response_schema else {}),
                 },
             )
             break
@@ -354,9 +382,11 @@ def summarize_posts(posts: list[dict[str, Any]]) -> list[str]:
     for post_batch in batches(posts, batch_size):
         base_contents = (
             "Return valid JSON exactly in this shape:\n"
-            '{"summaries":[{"index":1,"summary":"..."}]}\n'
+            '{"summaries":[{"index":1,"sentences":["..."]}]}\n'
             "The number of summaries must exactly match the number of input posts. "
-            "Preserve each input index exactly. Use no more than three sentences per post.\n"
+            "Preserve each input index exactly. Return one to three complete "
+            "sentences in the sentences array; put exactly one sentence in each "
+            "array item. Do not truncate sentences.\n"
             "Input posts: "
             + json.dumps(
                 [{"index": i + 1, "date": post["post_date"], "content": post["post_content"]}
@@ -377,6 +407,7 @@ def summarize_posts(posts: list[dict[str, Any]]) -> list[str]:
                 rows = gemini_json(
                     contents,
                     POST_SUMMARY_SYSTEM_INSTRUCTION,
+                    POST_SUMMARY_RESPONSE_SCHEMA,
                 ).get("summaries")
                 if not isinstance(rows, list) or len(rows) != len(post_batch):
                     raise ValueError("Gemini returned an invalid post summary count")
@@ -384,12 +415,23 @@ def summarize_posts(posts: list[dict[str, Any]]) -> list[str]:
                 for row in rows:
                     if not isinstance(row, dict) or not isinstance(row.get("index"), int):
                         raise ValueError("Gemini returned an invalid post summary")
-                    summary = row.get("summary")
-                    if not isinstance(summary, str) or not summary.strip():
-                        raise ValueError("Gemini returned an empty post summary")
-                    if sentence_count(summary.strip()) > 3:
-                        raise ValueError("a post summary exceeds three sentences")
-                    candidate[row["index"]] = summary.strip()
+                    sentences = row.get("sentences")
+                    if (
+                        not isinstance(sentences, list)
+                        or not 1 <= len(sentences) <= 3
+                        or any(
+                            not isinstance(sentence, str)
+                            or not sentence.strip()
+                            or sentence_count(sentence.strip()) != 1
+                            for sentence in sentences
+                        )
+                    ):
+                        raise ValueError(
+                            "Gemini returned an invalid post sentence array"
+                        )
+                    candidate[row["index"]] = " ".join(
+                        sentence.strip() for sentence in sentences
+                    )
                 by_index = candidate
                 break
             except ValueError as exc:
