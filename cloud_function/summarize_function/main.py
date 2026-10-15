@@ -22,6 +22,10 @@ from flask import Request, jsonify
 logger = logging.getLogger(__name__)
 
 
+class InvalidPayloadError(ValueError):
+    """Raised when a caller sends a payload outside the webhook contract."""
+
+
 POST_SUMMARY_SYSTEM_INSTRUCTION = """
 ROLE
 You will summarize LinkedIn posts for an internal business intelligence report.
@@ -224,13 +228,17 @@ def select_post_date(
 
 def parse_result_object(payload: dict[str, Any]) -> list[dict[str, Any]]:
     result = payload.get("resultObject", payload.get("result", []))
+    if result is None:
+        return []
     if isinstance(result, str):
         try:
             result = json.loads(result)
         except json.JSONDecodeError as exc:
-            raise ValueError("resultObject is not valid JSON") from exc
+            raise InvalidPayloadError("resultObject is not valid JSON") from exc
+        if result is None:
+            return []
     if not isinstance(result, list):
-        raise ValueError("resultObject must be a list")
+        raise InvalidPayloadError("resultObject must be a list")
     return [item for item in result if isinstance(item, dict)]
 
 
@@ -791,6 +799,18 @@ def summarization_webhook(request: Request):
     if not isinstance(request_payload, dict):
         return jsonify({"detail": "JSON object payload is required"}), 400
 
+    payload = request_payload.get("payload")
+    payload_shape = payload if isinstance(payload, dict) else request_payload
+    result_object = payload_shape.get(
+        "resultObject", payload_shape.get("result")
+    )
+    logger.info(
+        "Received summarization payload shape: keys=%s resultObject_type=%s result_type=%s",
+        sorted(payload_shape),
+        type(result_object).__name__,
+        type(payload_shape.get("result")).__name__,
+    )
+
     job_id = str(uuid.uuid4())
     try:
         action = request_payload.get("action", "process_week")
@@ -812,6 +832,17 @@ def summarization_webhook(request: Request):
             start_date,
             end_date,
         )
+    except InvalidPayloadError as exc:
+        logger.warning(
+            "Invalid summarization payload; job_id=%s error=%s",
+            job_id,
+            str(exc),
+        )
+        return jsonify({
+            "detail": "Invalid webhook payload",
+            "job_id": job_id,
+            "error": str(exc),
+        }), 400
     except (ValueError, RuntimeError, KeyError, json.JSONDecodeError) as exc:
         logger.warning(
             "Summarization processing failed; job_id=%s error_type=%s error=%s",

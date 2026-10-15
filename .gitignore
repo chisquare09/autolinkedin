@@ -7,3 +7,4 @@ service-account.json
 cloud_function/*.json
 *.tmp
 note.txt
+service-account.json

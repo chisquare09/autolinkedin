@@ -22,6 +22,10 @@ from flask import Request, jsonify
 logger = logging.getLogger(__name__)
 
 
+class InvalidPayloadError(ValueError):
+    """Raised when Phantom sends a payload outside the webhook contract."""
+
+
 POST_SUMMARY_SYSTEM_INSTRUCTION = """
 ROLE
 You will summarize LinkedIn posts for an internal business intelligence report.
@@ -224,13 +228,17 @@ def select_post_date(
 
 def parse_result_object(payload: dict[str, Any]) -> list[dict[str, Any]]:
     result = payload.get("resultObject", payload.get("result", []))
+    if result is None:
+        return []
     if isinstance(result, str):
         try:
             result = json.loads(result)
         except json.JSONDecodeError as exc:
-            raise ValueError("resultObject is not valid JSON") from exc
+            raise InvalidPayloadError("resultObject is not valid JSON") from exc
+        if result is None:
+            return []
     if not isinstance(result, list):
-        raise ValueError("resultObject must be a list")
+        raise InvalidPayloadError("resultObject must be a list")
     return [item for item in result if isinstance(item, dict)]
 
 
@@ -726,12 +734,31 @@ def phantom_webhook(request: Request):
     if not isinstance(request_payload, dict):
         return jsonify({"detail": "JSON object payload is required"}), 400
 
+    result_object = request_payload.get("resultObject", request_payload.get("result"))
+    logger.info(
+        "Received Phantom webhook payload shape: keys=%s resultObject_type=%s result_type=%s",
+        sorted(request_payload),
+        type(result_object).__name__,
+        type(request_payload.get("result")).__name__,
+    )
+
     job_id = str(uuid.uuid4())
     try:
         action = request_payload.get("action", "ingest_results")
         if action != "ingest_results":
             raise ValueError("action must be 'ingest_results'")
         result = ingest_results(request_payload)
+    except InvalidPayloadError as exc:
+        logger.warning(
+            "Invalid Phantom webhook payload; job_id=%s error=%s",
+            job_id,
+            str(exc),
+        )
+        return jsonify({
+            "detail": "Invalid webhook payload",
+            "job_id": job_id,
+            "error": str(exc),
+        }), 400
     except (ValueError, RuntimeError, KeyError, json.JSONDecodeError) as exc:
         logger.warning(
             "Ingestion processing failed; job_id=%s error_type=%s error=%s",
