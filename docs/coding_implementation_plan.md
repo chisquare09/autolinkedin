@@ -23,7 +23,8 @@ run, scheduled, and retried independently.
 The first release covers:
 
 1. Launching a PhantomBuster agent on a schedule through the PhantomBuster API.
-2. Receiving the completed run's CSV download link.
+2. Receiving the completed run's CSV result file through PhantomBuster's
+   documented result-file API.
 3. Creating a new weekly worksheet before importing the CSV.
 4. Importing the CSV into that worksheet.
 5. Adding a `content_summary` column to that worksheet.
@@ -152,11 +153,11 @@ PhantomAutomation.gs
       v
 PhantomBuster agent
       |
-      | completed run: CSV download link from result API
+      | completed run: accumulated agent result-file metadata
       v
 PhantomAutomation.gs
       |
-      | create worksheet, then import CSV
+      | build stable result.csv URL, compare rows, then import new data
       v
 04 - 10 Oct 2025 worksheet
       |
@@ -191,8 +192,13 @@ starting another scrape.
    Session key belongs in the Phantom's Advanced settings and must match the
    key used by the connected LinkedIn browser session; it is not an Apps
    Script launch argument.
-4. Confirm the PhantomBuster result response field containing the completed CSV
-   download link and its expiry/access requirements.
+4. Configure PhantomBuster File management as **Combine files** and confirm
+   that the selected Activity Extractor retains the required historical rows
+   in its accumulated result file. The documented
+   `GET /agents/fetch?id=<agentId>` flow returns the agent-level
+   `orgS3Folder` and `s3Folder` metadata used to construct the stable
+   `result.csv` URL. The launch-specific container result remains useful for
+   diagnostics, but is not required to identify a separate result file.
 5. Confirm the reporting timezone and choose the closed reporting period
    convention, preferably Sunday–Saturday.
 6. Confirm the maximum expected row count so Gemini calls can be batched within
@@ -204,6 +210,46 @@ starting another scrape.
 
 Deliverable: a short configuration table in the new scripts and this plan
 updated with the final external API choices.
+
+### Official documentation findings
+
+The following behavior is confirmed by PhantomBuster documentation and should
+be treated as implementation requirements:
+
+- `/agents/launch` queues an agent and accepts `argument` or
+  `bonusArgument`; Phantom argument keys must match the selected Phantom's
+  exact setup/API schema.
+- `/containers/fetch-all` returns launch containers and statuses such as
+  `starting`, `running`, `finished`, and `launch error`. The stored container
+  ID must be matched before retrieving output.
+- `/containers/fetch-result-object` returns the result data for one specific
+  container. It is useful for launch diagnostics, but it is not required for
+  the normal accumulated-file import flow.
+- `/agents/fetch` returns the agent's result-file metadata, including
+  `orgS3Folder` and `s3Folder`, from which Apps Script can construct the
+  documented `result.csv` URL. With **Combine files**, this is the intended
+  stable accumulated-result URL for the Phantom. It does not identify only
+  the latest container, so Apps Script must compare stable post keys and
+  import only rows not already recorded.
+- The LinkedIn Activity Extractor reads a Google Sheet or public CSV input and
+  uses the exact configured column header, such as
+  `linkedin_profile_url`. Its per-launch profile count and activity count are
+  limits, not guarantees that all historical activity is visible.
+- The extractor can only collect activities LinkedIn exposes during the
+  session. An after-date cutoff does not guarantee complete historical
+  coverage.
+- PhantomBuster's documentation states that free plans may restrict CSV
+  exports and CSV download links; the production workflow must verify the
+  current workspace plan before relying on CSV files.
+
+These sources should be kept with the implementation notes:
+
+- [Phantom arguments](https://support.phantombuster.com/hc/en-us/articles/32397255455378-How-to-Use-Phantom-Arguments-in-the-PhantomBuster-API)
+- [LinkedIn Activity Extractor](https://support.phantombuster.com/hc/en-us/articles/26971008280850-How-to-Use-the-LinkedIn-Activity-Extractor)
+- [Retrieve result files](https://support.phantombuster.com/hc/en-us/articles/23117755693458-How-to-retrieve-a-Phantom-s-result-files-CSV-or-JSON-via-API)
+- [Retrieve one launch result](https://support.phantombuster.com/hc/en-us/articles/32476143412498-How-to-retrieve-the-result-object-for-a-specific-Phantom-launch-via-API)
+- [`/containers/fetch-all`](https://hub.phantombuster.com/reference/get_containers-fetch-all)
+- [`/containers/fetch-result-object`](https://hub.phantombuster.com/reference/get_containers-fetch-result-object)
 
 ### Phase 1: Create shared Apps Script configuration and helpers
 
@@ -355,56 +401,59 @@ Implement `PhantomAutomation.gs` in this order:
    it to the Apps Script payload unless PhantomBuster's API explicitly requires
    a launch-level persisted-volume field for this agent.
 
-   Configure PhantomBuster File management as **Create new files** for the
-   weekly-tab design. Each completed launch should produce a separate result
-   file that Apps Script imports into the worksheet for that reporting period.
-   Because this mode reprocesses the configured input from the beginning on
-   every launch, `dateAfter`, post limits, and Apps Script deduplication remain
-   necessary.
+   Configure PhantomBuster File management as **Combine files**. Each
+   completed launch appends its results to the Phantom's accumulated result
+   file, allowing Apps Script to reconstruct one stable download URL from the
+   permanent Agent ID. This does not identify which rows came from the latest
+   launch, so Apps Script must compare stable post keys against previously
+   imported rows.
 
-   Set PhantomBuster's **Number of folders to keep** to `53` for this weekly
-   workflow. This retains approximately one year of result folders, including
-   an extra week for calendar variation and recovery. Configure this value in
-   PhantomBuster's File management settings; it is not an Apps Script property
-   and is not sent in the launch request. This setting is file retention only;
-   it does not prevent duplicate LinkedIn posts.
-
-   **Combine files** is useful for a cumulative Phantom output, but it can
-   return historical rows again and make a weekly import look duplicated.
-   **Delete previous files** is not recommended because it removes prior
-   result files and does not provide application-level duplicate protection.
+   With **Combine files**, the former `Number of folders to keep: 53` setting
+   is no longer the primary retention mechanism for weekly imports. Confirm
+   PhantomBuster's accumulated-file retention and size limits before
+   production. **Delete previous files** remains unsuitable because it removes
+   recovery history and also starts processing from the beginning.
 
 5. Validate HTTP status and response JSON. Store the returned run/launch ID in
    a lightweight control sheet or Script Properties so a retry does not launch
    the same run unintentionally.
-6. Poll the documented Phantom status endpoint with bounded retries across
-   separate time-based executions.
-7. When the run is complete, retrieve and validate the CSV download link.
-8. Create the deterministic weekly worksheet before importing any CSV data. If
-   the sheet already exists for the same completed container, reuse it.
-9. Import the CSV into the worksheet. Prefer the Google Sheets `IMPORTDATA`
-   formula only when the CSV URL is publicly readable and formula recalculation
-   can be verified. Otherwise, fetch the CSV with `UrlFetchApp.fetch`, parse it
-   with `Utilities.parseCsv`, and write the values with one batched
-   `setValues` call.
+6. Poll `GET /containers/fetch-all?agentId=<agentId>` with bounded retries
+   across separate time-based executions. Match the stored container ID and
+   require a finalized `finished` status before retrieval.
+7. Call `GET /agents/fetch?id=<agentId>` and construct
+   `https://phantombuster.s3.amazonaws.com/<orgS3Folder>/<s3Folder>/result.csv`.
+   The permanent Agent ID and Combine files setting make this the stable
+   accumulated-result URL. The downloaded file contains historical rows as
+   well as rows from the latest launch.
+8. Create the deterministic weekly worksheet before importing data. If the
+   sheet already exists, reuse it rather than creating a suffix.
+9. Download the accumulated CSV with `UrlFetchApp.fetch`,
+   `Utilities.parseCsv`, and a batched `setValues` call. Use the Google Sheets
+   `IMPORTDATA` formula only if the actual result URL is publicly readable and
+   formula recalculation can be verified.
 10. Append `content_summary`, status, error, and timestamp headers after the
     final raw source column.
-11. Mark the import complete only after the imported range has the expected
+11. Compare every downloaded row with the workbook-wide imported stable-key
+    index. Import only rows not already recorded into the worksheet for the
+    current reporting period, while preserving historical rows already stored
+    in other weekly worksheets.
+12. Mark the import complete only after the imported range has the expected
     headers and row count.
-12. Deduplicate imported rows in Apps Script before writing or updating the
-    weekly worksheet. Phantom's file setting controls result-file storage; it
-    does not prove that two launches will never return the same LinkedIn post.
+13. Deduplicate rows within the accumulated CSV and across recovery imports.
+    Phantom's Combine files setting controls storage and continuation; Apps
+    Script remains the authoritative deduplication layer.
 
-The script must distinguish launch failure, timeout, missing or expired CSV
-link, CSV download failure, empty result, provider error rows, and successful
-zero-post results. Re-running a completed launch must reuse the existing weekly
-worksheet instead of creating a second duplicate tab.
+The script must distinguish launch failure, timeout, incomplete container,
+missing or expired CSV metadata/link, CSV download failure, malformed CSV,
+empty result, provider error rows, and successful zero-post results.
+Re-running a completed launch must reuse the existing weekly worksheet instead
+of creating a second duplicate tab.
 
 Duplicate prevention must exist in both layers, with Apps Script as the
 authoritative layer:
 
-1. PhantomBuster: use **Create new files** so each launch has a separate input
-   file and does not append prior result files by default.
+1. PhantomBuster: use **Combine files** so the Phantom maintains one
+   accumulated result file and can continue from prior output where supported.
 2. Apps Script: calculate a stable post key, preferably the normalized
    `postUrl` or provider post ID. If no stable ID exists, use a documented
    fallback such as normalized profile URL + post date + normalized post
@@ -413,10 +462,14 @@ authoritative layer:
    when a recovery run imports the same post again.
 4. Apps Script: use the reporting-period worksheet name plus the stable post
    key to make retries and overlap reconciliation idempotent.
+5. Apps Script: persist the imported stable keys or an equivalent high-water
+   mark in a control sheet so a complete accumulated-file download does not
+   require rewriting all historical rows.
 
-`Combine files` does not make the data semantically unique; it only controls
-whether Phantom appends output to an existing result file. `Delete previous
-files` does not make data unique either and can destroy recovery history.
+`Combine files` does not make the data semantically unique; it controls whether
+Phantom appends output to an existing result file. The permanent Agent ID makes
+the file URL stable, but only Apps Script can decide whether a downloaded row
+is new for this workbook.
 
 ### Phase 3: Implement Gemini content summarization
 
@@ -562,6 +615,8 @@ The implementation must make failures visible and rerunnable:
 | Missing Script Property | Stop before external calls and show the property name |
 | Phantom launch non-2xx | Record response body without secrets; do not create a result sheet |
 | Phantom timeout | Preserve launch ID and allow polling/import retry |
+| Container not finalized | Continue bounded polling; do not retrieve or import partial output |
+| Missing accumulated result metadata or URL | Record an explicit retrieval error and preserve the container ID |
 | Empty valid result | Create a weekly sheet with headers and zero data rows |
 | Malformed result row | Preserve diagnostics and continue only when row alignment is safe |
 | Gemini transient failure | Retry the batch a bounded number of times |
@@ -605,14 +660,17 @@ Mock `UrlFetchApp.fetch` and verify:
    configuration.
 6. The returned container/launch ID is stored and reused during polling
    retries.
-7. A completed response containing a CSV link is validated before import.
-8. The weekly worksheet is created before the CSV import starts.
-9. A CSV URL is either imported through verified `IMPORTDATA` behavior or
-   fetched, parsed, and written by Apps Script.
-10. Duplicate post keys within one CSV are removed before writing.
-11. Running the same completed result twice reuses the same weekly sheet and
+7. The finalized run is confirmed before result import.
+8. `/agents/fetch` returns `orgS3Folder` and `s3Folder`, and Apps Script
+   constructs the stable accumulated `result.csv` URL.
+9. The downloaded accumulated CSV is parsed and only rows with stable keys
+   not already recorded in the workbook are imported.
+10. The weekly worksheet is created before import.
+11. Duplicate post keys within the accumulated file and across recovery
+    imports are removed before writing.
+12. Running the same completed result twice reuses the same weekly sheet and
     does not create duplicate post rows.
-12. Missing, expired, empty, and invalid CSV responses remain distinguishable.
+13. Missing, expired, empty, and invalid responses remain distinguishable.
 
 ### 6.3 Mocked Gemini tests
 
@@ -652,8 +710,10 @@ Use a test spreadsheet, a test Phantom agent, and a small set of profiles:
 2. Set `ENABLE_MANUAL_TEST_MENU=true` and refresh the spreadsheet.
 3. Run `Phantom Data Scraping` from the temporary testing menu.
 4. Confirm the Phantom API request and returned launch ID.
-5. Confirm completion polling retrieves the CSV link, creates one weekly
-   worksheet, and imports the CSV.
+5. Confirm completion polling detects the finalized run, `/agents/fetch`
+   returns the accumulated result-file metadata, and Apps Script constructs
+   and downloads the stable `result.csv` before importing only new rows into
+   the weekly worksheet.
 6. Confirm the worksheet contains raw fields and appended
    `content_summary`.
 7. Run `Content Summarization` from the temporary testing menu and verify
@@ -664,7 +724,8 @@ Use a test spreadsheet, a test Phantom agent, and a small set of profiles:
    following it.
 10. Force an invalid Gemini response and confirm visible row-level errors.
 11. Re-run both testing actions; confirm no duplicate worksheet, rows, or
-    summaries are created.
+    summaries are created even though the accumulated CSV contains historical
+    rows.
 12. Test an empty Phantom result and a provider error response.
 13. Test lock behavior by starting overlapping executions.
 14. Set `ENABLE_MANUAL_TEST_MENU=false`, refresh the spreadsheet, and confirm
