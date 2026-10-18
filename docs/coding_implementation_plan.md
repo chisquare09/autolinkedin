@@ -132,7 +132,6 @@ Recommended pipeline columns are:
 content_summary
 processing_status
 processing_error
-processed_at
 ```
 
 Only `content_summary` is required for the first business release; the status
@@ -263,6 +262,8 @@ Implement small, testable helpers in `apps_scripts/` for:
 - importing and parsing the Phantom CSV;
 - reading headers and rows as objects;
 - finding the `content_summary` column;
+- writing persistent progress entries to `_automation_log` and showing
+  short spreadsheet toasts during active runs;
 - escaping/logging errors without exposing secrets.
 
 Required Script Properties:
@@ -272,9 +273,8 @@ PHANTOMBUSTER_API_KEY
 PHANTOMBUSTER_AGENT_ID
 GEMINI_API_KEY
 GEMINI_MODEL
-REPORTING_TIMEZONE
+TIMEZONE
 WEEK_START_DAY
-SCHEDULE_TIMEZONE
 SCHEDULE_DAY
 SCHEDULE_TIME
 ENABLE_MANUAL_TEST_MENU=false
@@ -286,9 +286,12 @@ alerts, or written to logs.
 Apps Script does not use the repository `.env` file at runtime. These values
 must be stored as Apps Script Project Settings > Script Properties. The
 `GEMINI_MODEL` property is read in the same way as the scheduling properties.
-`SCHEDULE_TIMEZONE` controls date calculations and trigger creation,
-`SCHEDULE_DAY` identifies the weekday, and `SCHEDULE_TIME` defines the
-requested local trigger time using the `HH:mm` format.
+`TIMEZONE` controls reporting-period calculations, post date filtering,
+worksheet-name formatting, and trigger creation. `WEEK_START_DAY` identifies
+the first day of the reporting period. `SCHEDULE_DAY` identifies the weekday
+on which the automation runs, and `SCHEDULE_TIME` defines the requested local
+trigger time using the `HH:mm` format. `WEEK_START_DAY` and `SCHEDULE_DAY` may
+be different; the schedule should occur after the reporting period closes.
 
 The script should expose a `configureTriggers()` function that removes and
 recreates only this project's managed triggers using those properties. The
@@ -302,7 +305,7 @@ If exact 12:59 execution is mandatory, an external scheduler is required.
 Example configuration for a complete Sunday–Saturday report:
 
 ```text
-SCHEDULE_TIMEZONE=Australia/Brisbane
+TIMEZONE=Australia/Brisbane
 SCHEDULE_DAY=SUNDAY
 SCHEDULE_TIME=00:15
 ```
@@ -310,7 +313,7 @@ SCHEDULE_TIME=00:15
 Example configuration for the user's proposed Saturday trigger:
 
 ```text
-SCHEDULE_TIMEZONE=Australia/Brisbane
+TIMEZONE=Australia/Brisbane
 SCHEDULE_DAY=SATURDAY
 SCHEDULE_TIME=12:59
 ```
@@ -325,7 +328,7 @@ run collects the remaining Saturday data.
 Implement `PhantomAutomation.gs` in this order:
 
 1. Read and validate `customer_info`.
-2. Compute the most recent closed reporting window in `SCHEDULE_TIMEZONE`.
+2. Compute the most recent closed reporting window in `TIMEZONE`.
    Do not use the current partial day as a completed weekly period.
 3. Build the Phantom agent launch payload from the configured agent ID. If the
    customer list is supplied by Apps Script, use the workbook containing
@@ -431,8 +434,8 @@ Implement `PhantomAutomation.gs` in this order:
    `Utilities.parseCsv`, and a batched `setValues` call. Use the Google Sheets
    `IMPORTDATA` formula only if the actual result URL is publicly readable and
    formula recalculation can be verified.
-10. Append `content_summary`, status, error, and timestamp headers after the
-    final raw source column.
+10. Append only `content_summary`, `processing_status`, and
+    `processing_error` after the final raw source column.
 11. Compare every downloaded row with the workbook-wide imported stable-key
     index. Import only rows not already recorded into the worksheet for the
     current reporting period, while preserving historical rows already stored
@@ -500,13 +503,15 @@ Implement `SummarizationAutomation.gs` in this order:
    - every submitted row has exactly one response;
    - `row_id` values are unique and match the batch;
    - `sentences` contains one to three complete sentence strings;
+   - the combined text of each post's sentences contains no more than 100
+     words;
    - no sentence is silently truncated locally;
    - empty or fabricated summaries are rejected.
 9. Join validated sentences with spaces and write results to the exact target
    rows using one batched range update.
 10. Record per-row failure status and error text for invalid model output or
-    transport errors. Retry transient API failures with a small bounded retry
-    count; do not retry indefinitely.
+    transport errors. Allow one validation correction request and up to three
+    total attempts for transient API failures; do not retry indefinitely.
 11. Continue with the next batch when safe, while returning a final execution
     summary showing processed, skipped, and failed rows.
 
@@ -521,7 +526,7 @@ scraping, import results, or start summarization.
 
 Create the production triggers and handoff in this order:
 
-1. `configureTriggers`: reads `SCHEDULE_TIMEZONE`, `SCHEDULE_DAY`, and
+1. `configureTriggers`: reads `TIMEZONE`, `SCHEDULE_DAY`, and
    `SCHEDULE_TIME`, then validates the `HH:mm` value and creates the managed
    weekly trigger. For a complete Sunday–Saturday report, configure it for a
    time after Saturday ends, such as Sunday 00:15 in the reporting timezone.

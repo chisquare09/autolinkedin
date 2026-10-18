@@ -2,25 +2,20 @@ const PHANTOM_API_BASE_URL = 'https://api.phantombuster.com/api/v2';
 const RESULT_FILE_BASE_URL = 'https://phantombuster.s3.amazonaws.com';
 const CUSTOMER_INFO_SHEET = 'customer_info';
 const AUTOMATION_STATE_SHEET = '_automation_state';
+const AUTOMATION_LOG_SHEET = '_automation_log';
 const RAW_RESULT_NAME = 'result.csv';
 const PIPELINE_HEADERS = [
   'content_summary',
   'processing_status',
-  'processing_error',
-  'processed_at',
-  'customer_name',
-  'week_start',
-  'week_end',
-  'source_post_key'
+  'processing_error'
 ];
 const REQUIRED_PROPERTIES = [
   'PHANTOMBUSTER_API_KEY',
   'PHANTOMBUSTER_AGENT_ID',
   'GEMINI_API_KEY',
   'GEMINI_MODEL',
-  'REPORTING_TIMEZONE',
+  'TIMEZONE',
   'WEEK_START_DAY',
-  'SCHEDULE_TIMEZONE',
   'SCHEDULE_DAY',
   'SCHEDULE_TIME',
   'ENABLE_MANUAL_TEST_MENU'
@@ -50,14 +45,20 @@ function schedulePhantomRun() {
 }
 
 function schedulePhantomRun_() {
+  automationLog_('INFO', 'PHANTOM_LAUNCH', 'Preparing PhantomBuster launch.');
   const config = getConfig_();
   const period = getClosedReportingPeriod_(
     new Date(),
-    config.reportingTimezone,
+    config.timezone,
     config.weekStartDay
   );
   const existing = readState_(STATE_KEYS.ACTIVE_RUN);
   if (existing && existing.status !== 'imported' && existing.status !== 'failed') {
+    automationLog_(
+      'INFO',
+      'PHANTOM_LAUNCH',
+      'Reusing active container ' + existing.containerId + '.'
+    );
     return existing;
   }
 
@@ -102,6 +103,11 @@ function schedulePhantomRun_() {
     pollAttempts: 0
   };
   writeState_(STATE_KEYS.ACTIVE_RUN, run);
+  automationLog_(
+    'INFO',
+    'PHANTOM_LAUNCH',
+    'Launched container ' + run.containerId + '.'
+  );
   return run;
 }
 
@@ -110,12 +116,14 @@ function pollPhantomRun() {
 }
 
 function pollPhantomRun_() {
+  automationLog_('INFO', 'PHANTOM_POLL', 'Checking Phantom container status.');
   const config = getConfig_();
   const run = readState_(STATE_KEYS.ACTIVE_RUN);
   if (!run) {
     throw new Error('No active Phantom launch is stored.');
   }
   if (run.status === 'imported') {
+    automationLog_('INFO', 'PHANTOM_POLL', 'Container was already imported.');
     return run;
   }
 
@@ -128,6 +136,7 @@ function pollPhantomRun_() {
   if (!container) {
     run.pollAttempts = Number(run.pollAttempts || 0) + 1;
     writeState_(STATE_KEYS.ACTIVE_RUN, run);
+    automationLog_('INFO', 'PHANTOM_POLL', 'Container is not visible yet.');
     return run;
   }
 
@@ -136,6 +145,11 @@ function pollPhantomRun_() {
   ).toLowerCase();
   run.pollAttempts = Number(run.pollAttempts || 0) + 1;
   run.lastStatus = status;
+  automationLog_(
+    'INFO',
+    'PHANTOM_POLL',
+    'Container ' + run.containerId + ' status: ' + status + '.'
+  );
   if (status === 'launch error' || status === 'launch_error' ||
       status === 'error' || status === 'failed') {
     run.status = 'failed';
@@ -163,6 +177,12 @@ function pollPhantomRun_() {
     sheetName: imported.sheetName,
     importedAt: run.importedAt
   });
+  automationLog_(
+    'INFO',
+    'PHANTOM_IMPORT',
+    'Imported ' + imported.importedRows + ' new row(s); skipped ' +
+      imported.skippedRows + '.'
+  );
   return run;
 }
 
@@ -175,7 +195,7 @@ function retryIncompleteWork() {
     }
     const lastWeek = readState_(STATE_KEYS.LAST_WEEK);
     if (lastWeek && lastWeek.weekKey) {
-      importAccumulatedResult_(
+      const imported = importAccumulatedResult_(
         {
           weekKey: lastWeek.weekKey,
           weekStart: lastWeek.weekStart,
@@ -183,6 +203,13 @@ function retryIncompleteWork() {
         },
         getConfig_()
       );
+      writeState_(STATE_KEYS.LAST_WEEK, {
+        weekKey: lastWeek.weekKey,
+        weekStart: lastWeek.weekStart,
+        weekEnd: lastWeek.weekEnd,
+        sheetName: imported.sheetName,
+        importedAt: new Date().toISOString()
+      });
     }
   });
 }
@@ -207,7 +234,7 @@ function configureTriggers() {
     .onWeekDay(day)
     .atHour(time.hour)
     .nearMinute(time.minute)
-    .inTimezone(config.scheduleTimezone)
+    .inTimezone(config.timezone)
     .create();
   ScriptApp.newTrigger('retryIncompleteWork')
     .timeBased()
@@ -220,6 +247,7 @@ function configureTriggers() {
 }
 
 function importAccumulatedResult_(run, config) {
+  automationLog_('INFO', 'PHANTOM_IMPORT', 'Fetching accumulated result metadata.');
   const metadata = phantomRequest_(
     '/agents/fetch?id=' + encodeURIComponent(config.agentId),
     'get',
@@ -252,33 +280,57 @@ function importAccumulatedResult_(run, config) {
     return row.some(function(value) { return String(value).trim() !== ''; });
   });
   const sheet = SpreadsheetApp.getActiveSpreadsheet();
-  const period = run.weekStart && run.weekEnd
-    ? {start: run.weekStart, end: run.weekEnd, key: run.weekKey}
+  const storedStart = normalizePeriodDate_(run.weekStart);
+  const storedEnd = normalizePeriodDate_(run.weekEnd);
+  const period = storedStart && storedEnd
+    ? {
+        start: storedStart,
+        end: storedEnd,
+        key: run.weekKey || storedStart + '_' + storedEnd
+      }
     : getClosedReportingPeriod_(
         new Date(),
-        config.reportingTimezone,
+        config.timezone,
         config.weekStartDay
       );
+  run.weekStart = period.start;
+  run.weekEnd = period.end;
+  run.weekKey = period.key;
   const outputSheet = getOrCreateWeeklySheet_(
     sheet,
     period,
     headers.concat(PIPELINE_HEADERS)
+  );
+  automationLog_(
+    'INFO',
+    'PHANTOM_IMPORT',
+    'Parsed ' + rows.length + ' accumulated CSV row(s).'
   );
   const existingKeys = readImportedKeys_(sheet);
   const seen = {};
   const customerMap = readCustomerMap_(sheet);
   const newRows = [];
   let skippedRows = 0;
+  let skippedInvalidDate = 0;
+  let skippedOutsidePeriod = 0;
+  let skippedDuplicate = 0;
 
   rows.forEach(function(row) {
     const item = rowToObject_(headers, row);
     const postDate = selectCsvDate_(item);
-    if (!postDate || !isDateInPeriod_(
-      postDate,
-      period.start,
-      period.end,
-      config.reportingTimezone
-    )) {
+    if (!postDate) {
+      skippedInvalidDate++;
+      skippedRows++;
+      return;
+    }
+    if (!isDateInPeriod_(
+        postDate,
+        period.start,
+        period.end,
+        config.timezone
+      )) {
+      if (isNaN(new Date(postDate).getTime())) skippedInvalidDate++;
+      else skippedOutsidePeriod++;
       skippedRows++;
       return;
     }
@@ -288,6 +340,7 @@ function importAccumulatedResult_(run, config) {
     const customer = customerMap[profile] || '';
     const key = stablePostKey_(item, profile);
     if (!key || seen[key] || existingKeys[key]) {
+      skippedDuplicate++;
       skippedRows++;
       return;
     }
@@ -295,9 +348,7 @@ function importAccumulatedResult_(run, config) {
     const normalizedRow = headers.map(function(header, index) {
       return row[index] === undefined ? '' : row[index];
     });
-    newRows.push(normalizedRow.concat([
-      '', 'pending', '', '', customer, period.start, period.end, key
-    ]));
+    newRows.push(normalizedRow.concat(['', 'pending', '']));
   });
 
   if (newRows.length) {
@@ -309,6 +360,13 @@ function importAccumulatedResult_(run, config) {
     ).setValues(newRows);
     appendImportedKeys_(sheet, Object.keys(seen));
   }
+  automationLog_(
+    'INFO',
+    'PHANTOM_IMPORT',
+    'Skipped rows: ' + skippedInvalidDate + ' invalid date, ' +
+      skippedOutsidePeriod + ' outside period, ' + skippedDuplicate +
+      ' duplicate or missing key.'
+  );
   return {
     sheetName: outputSheet.getName(),
     importedRows: newRows.length,
@@ -392,6 +450,21 @@ function getStateSheet_(spreadsheet) {
   return sheet;
 }
 
+function automationLog_(level, step, message) {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = spreadsheet.getSheetByName(AUTOMATION_LOG_SHEET);
+  if (!sheet) {
+    sheet = spreadsheet.insertSheet(AUTOMATION_LOG_SHEET);
+    sheet.getRange(1, 1, 1, 4).setValues([[
+      'timestamp', 'level', 'step', 'message'
+    ]]);
+  }
+  sheet.getRange(sheet.getLastRow() + 1, 1, 1, 4).setValues([[
+    new Date(), level, step, message
+  ]]);
+  spreadsheet.toast(message, step, 5);
+}
+
 function rowToObject_(headers, row) {
   const result = {};
   headers.forEach(function(header, index) { result[header] = row[index] || ''; });
@@ -436,9 +509,24 @@ function isDateInPeriod_(value, start, end, timezone) {
   return formatted >= start && formatted <= end;
 }
 
+function normalizePeriodDate_(value) {
+  if (value instanceof Date && !isNaN(value.getTime())) {
+    const formatted = Utilities.formatDate(value, 'UTC', 'yyyy-MM-dd');
+    return formatted.indexOf('1970-') === 0 ? '' : formatted;
+  }
+  const text = String(value || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    return text.indexOf('1970-') === 0 ? '' : text;
+  }
+  const date = new Date(text);
+  if (isNaN(date.getTime())) return '';
+  const formatted = Utilities.formatDate(date, 'UTC', 'yyyy-MM-dd');
+  return formatted.indexOf('1970-') === 0 ? '' : formatted;
+}
+
 function getClosedReportingPeriod_(now, timezone, weekStartDay) {
   const local = new Date(Utilities.formatDate(now, timezone, 'yyyy-MM-dd HH:mm:ss'));
-  const startDay = dayOfWeek_(weekStartDay);
+  const startDay = reportingDayIndex_(weekStartDay);
   const currentDay = local.getDay();
   const daysSinceStart = (currentDay - startDay + 7) % 7;
   const currentStart = new Date(local);
@@ -453,10 +541,32 @@ function getClosedReportingPeriod_(now, timezone, weekStartDay) {
   return {start: startText, end: endText, key: startText + '_' + endText};
 }
 
+function reportingDayIndex_(value) {
+  const indexes = {
+    SUNDAY: 0,
+    MONDAY: 1,
+    TUESDAY: 2,
+    WEDNESDAY: 3,
+    THURSDAY: 4,
+    FRIDAY: 5,
+    SATURDAY: 6
+  };
+  const normalized = String(value || '').toUpperCase();
+  if (indexes[normalized] === undefined) {
+    throw new Error('Invalid reporting weekday: ' + value);
+  }
+  return indexes[normalized];
+}
+
 function formatWeeklySheetName_(start, end) {
-  const timezone = getProperty('REPORTING_TIMEZONE') || 'UTC';
-  const startDate = new Date(start + 'T00:00:00');
-  const endDate = new Date(end + 'T00:00:00');
+  const timezone = getProperty('TIMEZONE') || 'UTC';
+  const startText = normalizePeriodDate_(start);
+  const endText = normalizePeriodDate_(end);
+  if (!startText || !endText) {
+    throw new Error('Reporting period contains an invalid date.');
+  }
+  const startDate = new Date(startText + 'T00:00:00');
+  const endDate = new Date(endText + 'T00:00:00');
   return Utilities.formatDate(startDate, timezone, 'dd') + ' - ' +
     Utilities.formatDate(endDate, timezone, 'dd MMM yyyy');
 }
@@ -516,9 +626,8 @@ function getConfig_() {
   return {
     apiKey: properties.PHANTOMBUSTER_API_KEY,
     agentId: properties.PHANTOMBUSTER_AGENT_ID,
-    reportingTimezone: properties.REPORTING_TIMEZONE,
+    timezone: properties.TIMEZONE,
     weekStartDay: properties.WEEK_START_DAY,
-    scheduleTimezone: properties.SCHEDULE_TIMEZONE,
     scheduleDay: properties.SCHEDULE_DAY,
     scheduleTime: properties.SCHEDULE_TIME
   };

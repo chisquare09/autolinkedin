@@ -1,5 +1,6 @@
 const SUMMARY_BATCH_SIZE = 10;
-const SUMMARY_MAX_RETRIES = 2;
+const SUMMARY_MAX_TRANSPORT_ATTEMPTS = 3;
+const SUMMARY_MAX_VALIDATION_ATTEMPTS = 2;
 const SUMMARY_SYSTEM_INSTRUCTION = [
   'ROLE',
   'You will summarize LinkedIn posts for an internal business intelligence report.',
@@ -28,6 +29,9 @@ const SUMMARY_SYSTEM_INSTRUCTION = [
   'LENGTH',
   '- Use one to three complete sentences per post.',
   '- Each sentence must be a separate item in the required `sentences` array.',
+  '- The combined summary for each individual post must contain no more than',
+  '  100 words.',
+  '- The 100-word limit applies to all sentences for that post combined.',
   '- Do not truncate a sentence or omit an important fact merely to satisfy the',
   '  limit; prioritize the main subject, key facts, and outcome.',
   '',
@@ -45,6 +49,7 @@ function summarizeImportedWeek() {
 }
 
 function summarizeImportedWeek_() {
+  automationLog_('INFO', 'GEMINI_SUMMARY', 'Starting content summarization.');
   const config = getSummaryConfig_();
   const sheet = findTargetWeeklySheet_();
   if (!sheet) {
@@ -52,17 +57,17 @@ function summarizeImportedWeek_() {
   }
   const values = sheet.getDataRange().getValues();
   if (values.length < 2) {
+    automationLog_('INFO', 'GEMINI_SUMMARY', 'No rows require summarization.');
     return {processed: 0, skipped: 0, failed: 0};
   }
   const headers = values[0].map(function(value) { return String(value).trim(); });
   const summaryColumn = headers.indexOf('content_summary') + 1;
   const statusColumn = headers.indexOf('processing_status') + 1;
   const errorColumn = headers.indexOf('processing_error') + 1;
-  const processedColumn = headers.indexOf('processed_at') + 1;
   const contentColumn = findHeader_(headers, [
     'postContent', 'post_content', 'textContent'
   ]) + 1;
-  if (!summaryColumn || !statusColumn || !errorColumn || !processedColumn) {
+  if (!summaryColumn || !statusColumn || !errorColumn) {
     throw new Error(
       'Weekly worksheet is missing content_summary processing columns.'
     );
@@ -93,6 +98,11 @@ function summarizeImportedWeek_() {
 
   let processed = 0;
   let failed = 0;
+  automationLog_(
+    'INFO',
+    'GEMINI_SUMMARY',
+    'Found ' + pending.length + ' unsummarized row(s).'
+  );
   for (let offset = 0; offset < pending.length; offset += SUMMARY_BATCH_SIZE) {
     const batch = pending.slice(offset, offset + SUMMARY_BATCH_SIZE);
     let result;
@@ -106,13 +116,18 @@ function summarizeImportedWeek_() {
           summaryColumn,
           statusColumn,
           errorColumn,
-          processedColumn,
           '',
           'failed',
           safeErrorMessage_(error)
         );
       });
       failed += batch.length;
+      automationLog_(
+        'ERROR',
+        'GEMINI_SUMMARY',
+        'Batch failed for ' + batch.length + ' row(s): ' +
+          safeErrorMessage_(error)
+      );
       continue;
     }
     const byId = {};
@@ -122,7 +137,7 @@ function summarizeImportedWeek_() {
       if (!summary) {
         writeProcessingResult_(
           sheet, item.sheetRow, summaryColumn, statusColumn,
-          errorColumn, processedColumn, '', 'failed',
+          errorColumn, '', 'failed',
           'Gemini response omitted this row.'
         );
         failed++;
@@ -130,30 +145,59 @@ function summarizeImportedWeek_() {
       }
       writeProcessingResult_(
         sheet, item.sheetRow, summaryColumn, statusColumn,
-        errorColumn, processedColumn, summary.text, 'completed', ''
+        errorColumn, summary.text, 'completed', ''
       );
       processed++;
     });
+    automationLog_(
+      'INFO',
+      'GEMINI_SUMMARY',
+      'Completed batch: ' + processed + ' processed, ' + failed + ' failed.'
+    );
   }
+  automationLog_(
+    failed ? 'WARN' : 'INFO',
+    'GEMINI_SUMMARY',
+    'Finished: ' + processed + ' processed, ' + skipped + ' skipped, ' +
+      failed + ' failed.'
+  );
   return {processed: processed, skipped: skipped, failed: failed};
 }
 
 function summarizeBatchWithRetry_(batch, config) {
   let lastError;
-  for (let attempt = 0; attempt <= SUMMARY_MAX_RETRIES; attempt++) {
+  let transportAttempts = 0;
+  let validationAttempts = 0;
+  let correctionInstruction = '';
+  while (true) {
     try {
-      const response = callGemini_(batch, config);
+      transportAttempts++;
+      const response = callGemini_(batch, config, correctionInstruction);
       return validateSummaryResponse_(response, batch);
     } catch (error) {
       lastError = error;
-      if (!isRetryableGeminiError_(error) && attempt === 0) break;
-      if (attempt < SUMMARY_MAX_RETRIES) Utilities.sleep(500 * (attempt + 1));
+      if (isValidationError_(error)) {
+        if (validationAttempts >= SUMMARY_MAX_VALIDATION_ATTEMPTS) break;
+        validationAttempts++;
+        correctionInstruction =
+          '\nYour previous response failed validation. Regenerate every ' +
+          'summary and strictly return one to three complete sentences per ' +
+          'post, with no more than 100 words in the combined summary for ' +
+          'each post. Preserve every row_id exactly.';
+        continue;
+      }
+      if (isRetryableGeminiError_(error) &&
+          transportAttempts < SUMMARY_MAX_TRANSPORT_ATTEMPTS) {
+        Utilities.sleep(500 * transportAttempts);
+        continue;
+      }
+      break;
     }
   }
   throw lastError || new Error('Gemini summary failed.');
 }
 
-function callGemini_(batch, config) {
+function callGemini_(batch, config, correctionInstruction) {
   const endpoint = 'https://generativelanguage.googleapis.com/v1beta/models/' +
     encodeURIComponent(config.model) + ':generateContent?key=' +
     encodeURIComponent(config.apiKey);
@@ -166,7 +210,7 @@ function callGemini_(batch, config) {
           post_date: item.post_date,
           post_content: item.post_content
         };
-      }))
+      })) + (correctionInstruction || '')
     }]
   }];
   const payload = {
@@ -229,42 +273,70 @@ function callGemini_(batch, config) {
 
 function validateSummaryResponse_(response, batch) {
   if (!response || !Array.isArray(response.summaries)) {
-    throw new Error('Gemini response did not contain summaries.');
+    throw new ValidationError_('Gemini response did not contain summaries.');
   }
   const expected = {};
   batch.forEach(function(item) { expected[String(item.row_id)] = true; });
   const seen = {};
-  return response.summaries.map(function(item) {
+  if (response.summaries.length !== batch.length) {
+    throw new ValidationError_('Gemini returned an invalid summary count.');
+  }
+  const result = response.summaries.map(function(item) {
     const id = String(item && item.row_id);
     if (!expected[id] || seen[id]) {
-      throw new Error('Gemini response contained an unexpected row_id.');
+      throw new ValidationError_(
+        'Gemini response contained an unexpected row_id.'
+      );
     }
     seen[id] = true;
     if (!Array.isArray(item.sentences) ||
         item.sentences.length < 1 || item.sentences.length > 3) {
-      throw new Error('Gemini returned an invalid sentence array.');
+      throw new ValidationError_('Gemini returned an invalid sentence array.');
     }
     const sentences = item.sentences.map(function(sentence) {
       if (typeof sentence !== 'string' || !sentence.trim() ||
           !/[.!?]["')\]]?$/.test(sentence.trim())) {
-        throw new Error('Gemini returned an incomplete sentence.');
+        throw new ValidationError_('Gemini returned an incomplete sentence.');
       }
       return sentence.trim();
     });
-    return {row_id: Number(item.row_id), text: sentences.join(' ')};
+    const text = sentences.join(' ');
+    if (countWords_(text) > 100) {
+      throw new ValidationError_(
+        'Gemini returned a summary longer than 100 words.'
+      );
+    }
+    return {row_id: Number(item.row_id), text: text};
   });
+  if (Object.keys(seen).length !== Object.keys(expected).length) {
+    throw new ValidationError_('Gemini response omitted one or more row IDs.');
+  }
+  return result;
+}
+
+function ValidationError_(message) {
+  this.name = 'ValidationError';
+  this.message = message;
+  this.isValidationError = true;
+}
+
+function isValidationError_(error) {
+  return Boolean(error && error.isValidationError);
+}
+
+function countWords_(value) {
+  const normalized = String(value || '').trim();
+  return normalized ? normalized.split(/\s+/).length : 0;
 }
 
 function writeProcessingResult_(
-  sheet, row, summaryColumn, statusColumn, errorColumn, processedColumn,
+  sheet, row, summaryColumn, statusColumn, errorColumn,
   summary, status, error
 ) {
-  const timestamp = status === 'completed' ? new Date() : '';
-  sheet.getRange(row, summaryColumn, 1, 4).setValues([[
+  sheet.getRange(row, summaryColumn, 1, 3).setValues([[
     summary,
     status,
-    error,
-    timestamp
+    error
   ]]);
 }
 
@@ -273,12 +345,23 @@ function findTargetWeeklySheet_() {
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
   if (last && last.sheetName) {
     const sheet = spreadsheet.getSheetByName(last.sheetName);
-    if (sheet) return sheet;
+    if (sheet && hasSummaryColumns_(sheet)) return sheet;
   }
   const candidates = spreadsheet.getSheets().filter(function(sheet) {
-    return /^\d{2} - \d{2} [A-Za-z]{3} \d{4}$/.test(sheet.getName());
+    return /^\d{2} - \d{2} [A-Za-z]{3} \d{4}$/.test(sheet.getName()) &&
+      hasSummaryColumns_(sheet);
   });
   return candidates.length ? candidates[candidates.length - 1] : null;
+}
+
+function hasSummaryColumns_(sheet) {
+  if (sheet.getLastRow() < 1) return false;
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn())
+    .getValues()[0]
+    .map(function(value) { return String(value).trim(); });
+  return headers.indexOf('content_summary') !== -1 &&
+    headers.indexOf('processing_status') !== -1 &&
+    headers.indexOf('processing_error') !== -1;
 }
 
 function getSummaryConfig_() {
