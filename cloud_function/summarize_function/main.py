@@ -355,6 +355,7 @@ def gemini_json(
                 config={
                     "response_mime_type": "application/json",
                     "system_instruction": system_instruction,
+                    "thinking_config": {"thinking_level": "LOW"},
                     **({"response_schema": response_schema} if response_schema else {}),
                 },
             )
