@@ -86,7 +86,8 @@ automatic production execution.
    ```
 
 5. Run `configureTriggers()` once from the Apps Script editor and approve the
-   requested permissions.
+   requested permissions. This installs the permanent weekly launcher and
+   removes any old recovery or summarization worker triggers.
 6. Refresh the spreadsheet after changing `ENABLE_MANUAL_TEST_MENU`.
 
 `TIMEZONE` is shared by reporting-period calculations, post date filtering,
@@ -100,7 +101,9 @@ after the selected reporting period closes.
 - Apps Script has permission to use Sheets, UrlFetch, Properties, Locks, and
   triggers.
 - The testing menu appears while `ENABLE_MANUAL_TEST_MENU=true`.
-- Managed weekly, recovery, and summarization triggers are installed.
+- The permanent weekly launch trigger is installed.
+- Recovery and summarization worker triggers are created only after a run
+  starts and are removed after the workflow finishes.
 - No API key is written to the workbook, logs, or source files.
 
 ## 3. Production workflow
@@ -115,14 +118,14 @@ Run scraping, import, deduplication, and summarization without manual clicks.
 2. Apps Script reads `customer_info`, calculates the latest closed reporting
    period, and launches the configured PhantomBuster Agent ID.
 3. Apps Script stores the returned Container ID in Script Properties.
-4. The recovery trigger calls `retryIncompleteWork` and polls the container
-   until it is finished.
+4. The launch creates temporary hourly worker triggers. The recovery trigger
+   calls `retryIncompleteWork` and polls the container until it is finished.
 5. Apps Script calls `/agents/fetch`, constructs the accumulated `result.csv`
    URL, and downloads the combined file.
 6. Apps Script creates or reuses the deterministic weekly tab.
 7. Apps Script calculates stable post keys and imports only rows not already
    recorded in `_automation_state`.
-8. The summarization trigger calls `summarizeImportedWeek`.
+8. The temporary summarization trigger calls `summarizeImportedWeek`.
 9. Apps Script submits unsummarized posts to Gemini with the full system prompt,
    structured JSON output, and `thinkingConfig` set to `LOW`.
 10. Valid summaries are written to `content_summary`; failures are written to
@@ -138,6 +141,12 @@ for successful posts, visible row-level failures, and progress entries in
 Apps Script toasts show the current step while the spreadsheet is open. The
 persistent `_automation_log` tab is the progress history when the toast has
 disappeared or the spreadsheet was closed.
+
+An hourly worker check does not automatically mean that Gemini was called. If
+the log reports `Found 0 unsummarized row(s)`, the summarizer only inspected
+the worksheet and sent no Gemini request, so no Gemini tokens or API fees were
+incurred for that execution. The same principle applies after the workflow
+has completed and the temporary worker triggers have been removed.
 
 ## 4. Manual testing workflow
 
@@ -175,8 +184,9 @@ The following checks have been confirmed complete from the Apps Script project
 screen:
 
 - The project has the required authorization scopes.
-- The managed triggers are installed for `retryIncompleteWork`,
-  `schedulePhantomRun`, and `summarizeImportedWeek`.
+- The permanent `schedulePhantomRun` trigger is installed.
+- The `retryIncompleteWork` and `summarizeImportedWeek` worker triggers are
+  created when a run starts and removed after the workflow reaches completion.
 
 The following checks still require Apps Script or live service testing:
 

@@ -195,6 +195,22 @@ https://www.linkedin.com/company/acme/,https://linkedin.com/feed/update/2,2026-1
         self.assertIn("100 words", self.summary_source)
         self.assertIn("function hasSummaryColumns_(sheet)", self.summary_source)
         self.assertIn("if (sheet && hasSummaryColumns_(sheet)) return sheet;", self.summary_source)
+        self.assertIn("Waiting for Phantom import to finish.", self.summary_source)
+        self.assertIn("status === 'failed'", self.summary_source)
+
+    def test_worker_triggers_are_lifecycle_managed(self):
+        self.assertIn("function ensureWorkerTriggers_()", self.phantom_source)
+        self.assertIn("function removeWorkerTriggers_()", self.phantom_source)
+        self.assertIn("ensureWorkerTriggers_();", self.phantom_source)
+        self.assertIn("removeWorkerTriggers_();", self.phantom_source)
+        self.assertNotIn(
+            "ScriptApp.newTrigger('retryIncompleteWork')\n"
+            "    .timeBased()\n"
+            "    .everyHours(1)\n"
+            "    .create();\n"
+            "  ScriptApp.newTrigger('summarizeImportedWeek')",
+            self.phantom_source,
+        )
 
     def test_manual_guide_identifies_live_only_cases(self):
         self.assertIn("PHANTOM_LAUNCH", self.guide_source)

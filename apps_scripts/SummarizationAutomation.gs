@@ -51,12 +51,23 @@ function summarizeImportedWeek() {
 function summarizeImportedWeek_() {
   automationLog_('INFO', 'GEMINI_SUMMARY', 'Starting content summarization.');
   const config = getSummaryConfig_();
+  const activeRun = readState_(STATE_KEYS.ACTIVE_RUN);
+  if (activeRun && activeRun.status !== 'imported' &&
+      activeRun.status !== 'failed') {
+    automationLog_(
+      'INFO',
+      'GEMINI_SUMMARY',
+      'Waiting for Phantom import to finish.'
+    );
+    return {processed: 0, skipped: 0, failed: 0};
+  }
   const sheet = findTargetWeeklySheet_();
   if (!sheet) {
     throw new Error('No imported weekly worksheet is available.');
   }
   const values = sheet.getDataRange().getValues();
   if (values.length < 2) {
+    removeWorkerTriggers_();
     automationLog_('INFO', 'GEMINI_SUMMARY', 'No rows require summarization.');
     return {processed: 0, skipped: 0, failed: 0};
   }
@@ -81,7 +92,8 @@ function summarizeImportedWeek_() {
   values.slice(1).forEach(function(row, index) {
     const content = String(row[contentColumn - 1] || '').trim();
     const summary = String(row[summaryColumn - 1] || '').trim();
-    if (!content || summary) {
+    const status = String(row[statusColumn - 1] || '').trim().toLowerCase();
+    if (!content || summary || status === 'failed') {
       skipped++;
       return;
     }
@@ -161,6 +173,7 @@ function summarizeImportedWeek_() {
     'Finished: ' + processed + ' processed, ' + skipped + ' skipped, ' +
       failed + ' failed.'
   );
+  removeWorkerTriggers_();
   return {processed: processed, skipped: skipped, failed: failed};
 }
 

@@ -24,6 +24,10 @@ const STATE_KEYS = {
   ACTIVE_RUN: 'active_phantom_run',
   LAST_WEEK: 'last_imported_week'
 };
+const WORKER_TRIGGER_HANDLERS = [
+  'retryIncompleteWork',
+  'summarizeImportedWeek'
+];
 
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
@@ -54,6 +58,7 @@ function schedulePhantomRun_() {
   );
   const existing = readState_(STATE_KEYS.ACTIVE_RUN);
   if (existing && existing.status !== 'imported' && existing.status !== 'failed') {
+    ensureWorkerTriggers_();
     automationLog_(
       'INFO',
       'PHANTOM_LAUNCH',
@@ -103,6 +108,7 @@ function schedulePhantomRun_() {
     pollAttempts: 0
   };
   writeState_(STATE_KEYS.ACTIVE_RUN, run);
+  ensureWorkerTriggers_();
   automationLog_(
     'INFO',
     'PHANTOM_LAUNCH',
@@ -155,6 +161,7 @@ function pollPhantomRun_() {
     run.status = 'failed';
     run.error = String(container.error || container.message || status);
     writeState_(STATE_KEYS.ACTIVE_RUN, run);
+    removeWorkerTriggers_();
     throw new Error('Phantom launch failed: ' + run.error);
   }
   if (status !== 'finished' && status !== 'done' && status !== 'completed') {
@@ -222,10 +229,8 @@ function configureTriggers() {
     const handler = trigger.getHandlerFunction();
     if ([
       'schedulePhantomRun',
-      'pollPhantomRun',
-      'retryIncompleteWork',
-      'summarizeImportedWeek'
-    ].indexOf(handler) !== -1) {
+      'pollPhantomRun'
+    ].concat(WORKER_TRIGGER_HANDLERS).indexOf(handler) !== -1) {
       ScriptApp.deleteTrigger(trigger);
     }
   });
@@ -236,14 +241,33 @@ function configureTriggers() {
     .nearMinute(time.minute)
     .inTimezone(config.timezone)
     .create();
-  ScriptApp.newTrigger('retryIncompleteWork')
-    .timeBased()
-    .everyHours(1)
-    .create();
-  ScriptApp.newTrigger('summarizeImportedWeek')
-    .timeBased()
-    .everyHours(1)
-    .create();
+}
+
+function ensureWorkerTriggers_() {
+  const installed = {};
+  ScriptApp.getProjectTriggers().forEach(function(trigger) {
+    installed[trigger.getHandlerFunction()] = true;
+  });
+  if (!installed.retryIncompleteWork) {
+    ScriptApp.newTrigger('retryIncompleteWork')
+      .timeBased()
+      .everyHours(1)
+      .create();
+  }
+  if (!installed.summarizeImportedWeek) {
+    ScriptApp.newTrigger('summarizeImportedWeek')
+      .timeBased()
+      .everyHours(1)
+      .create();
+  }
+}
+
+function removeWorkerTriggers_() {
+  ScriptApp.getProjectTriggers().forEach(function(trigger) {
+    if (WORKER_TRIGGER_HANDLERS.indexOf(trigger.getHandlerFunction()) !== -1) {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  });
 }
 
 function importAccumulatedResult_(run, config) {
