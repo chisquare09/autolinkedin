@@ -41,6 +41,7 @@ only:
 
 ```text
 content_summary
+content_type
 processing_status
 processing_error
 ```
@@ -303,8 +304,8 @@ accumulated CSV and a deterministic weekly worksheet.
 - The CSV is downloaded and parsed successfully.
 - The weekly tab uses the expected `DD - DD MMM YYYY` name.
 - Raw Phantom headers remain in their original order.
-- Only `content_summary`, `processing_status`, and `processing_error` are
-  appended.
+- Only `content_summary`, `content_type`, `processing_status`, and
+  `processing_error` are appended.
 - Repeating the import reuses the same tab and does not create a `(1)` tab.
 - `_automation_log` contains `PHANTOM_IMPORT`.
 

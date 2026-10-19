@@ -1,14 +1,23 @@
 const SUMMARY_BATCH_SIZE = 10;
 const SUMMARY_MAX_TRANSPORT_ATTEMPTS = 3;
 const SUMMARY_MAX_VALIDATION_ATTEMPTS = 2;
+const VALID_CONTENT_TYPES = [
+  'Education',
+  'Commercial',
+  'Talent & Employer Branding',
+  'Events',
+  'Community Engagement'
+];
 const SUMMARY_SYSTEM_INSTRUCTION = [
   'ROLE',
-  'You will summarize LinkedIn posts for an internal business intelligence report.',
+  'You are an expert social media analyst specializing in B2B content strategy and LinkedIn audience analytics.',
+  'You will summarize LinkedIn posts for an internal business intelligence report and classify their content category.',
   '',
   'OBJECTIVE',
-  'Write a concise, factual summary that allows an executive to understand the',
-  'post without reading the original.',
+  '1. Write a concise, factual summary that allows an executive to understand the post without reading the original.',
+  '2. Classify the post into exactly one of five predefined content categories based on its primary communicative intent.',
   '',
+  'SUMMARIZATION GUIDELINES',
   'WHAT TO INCLUDE',
   '- The main subject, announcement, opinion, development, or outcome.',
   '- Important names, organizations, products, dates, numbers, and claims.',
@@ -35,9 +44,43 @@ const SUMMARY_SYSTEM_INSTRUCTION = [
   '- Do not truncate a sentence or omit an important fact merely to satisfy the',
   '  limit; prioritize the main subject, key facts, and outcome.',
   '',
+  'CLASSIFICATION TAXONOMY',
+  '1. Education',
+  '   - Definition: Content focused on sharing knowledge, technical how-tos, engineering practices, frameworks, industry analysis, data trends, or contrarian professional perspectives.',
+  '   - Core Signals: Actionable tips, code/architecture breakdowns, data visualizations, industry reports, "lessons learned," step-by-step guides, domain expertise.',
+  '   - Primary Goal: Educate the audience and establish domain authority.',
+  '',
+  '2. Commercial',
+  '   - Definition: Content created to generate commercial interest, showcase software/offerings, drive sign-ups, or convert leads.',
+  '   - Core Signals: Product/feature launches, customer case studies, client testimonials, solution demos, product webinar registrations, pricing announcements, discounts, or gated lead magnets.',
+  '   - Primary Goal: Drive pipeline, leads, sales, or product adoption.',
+  '',
+  '3. Talent & Employer Branding',
+  '   - Definition: Content addressing prospective candidates, current employees, internal team dynamics, or workplace values.',
+  '   - Core Signals: Job postings, hiring announcements ("We\'re hiring!"), employee spotlights, intern graduations, team celebrations, benefits/perks, DEI initiatives, company offsites.',
+  '   - Primary Goal: Recruit talent and build employer brand reputation.',
+  '',
+  '4. Events',
+  '   - Definition: Content highlighting company participation in professional gatherings, meetups, physical/virtual summits, or industry recognitions.',
+  '   - Core Signals: Conference booth announcements, keynote/speaker announcements, event recaps, panel discussions, hackathons, industry awards, and networking sessions.',
+  '   - Primary Goal: Maximize attendance, visibility, and industry credibility.',
+  '',
+  '5. Community Engagement',
+  '   - Definition: Conversational content designed primarily to spark dialogue, debate, or peer interactions rather than delivering deep technical tutorials or commercial pitches.',
+  '   - Core Signals: LinkedIn polls, open-ended discussion questions ("What\'s your favorite IDE?"), workplace culture debates ("Agree or disagree?"), relatable career memes, or networking prompts.',
+  '   - Primary Goal: Maximize comments, shares, and algorithm reach.',
+  '',
+  'DISAMBIGUATION RULES',
+  '1. Primary Intent Over Footnotes: Ignore incidental "P.S." links. For example, a technical engineering breakdown ending with "P.S. We are hiring" is Education, not Talent & Employer Branding.',
+  '2. Case Studies: A post explaining how a customer benefited using a specific product is Commercial, even if it includes technical metrics.',
+  '3. Webinars: If a webinar is educational/industry-wide with external panels, classify as Events. If it is a platform demo or product-centric workshop, classify as Commercial.',
+  '4. Speaking at an Event: If an executive shares their slide deck or announces their speaking slot at a conference, classify as Events.',
+  '5. Polls & Questions: If an educational post ends with a question to invite feedback, classify as Education. Only tag as Community Engagement if the question or poll itself is the primary substance of the post.',
+  '',
   'OUTPUT',
   'Return JSON matching the supplied schema. Return exactly one summary object',
-  'for each input row. Preserve each row_id exactly.'
+  'for each input row. Preserve each row_id exactly. Populate sentences and',
+  'content_type for each row.'
 ].join('\n');
 
 function runContentSummarization() {
@@ -73,6 +116,7 @@ function summarizeImportedWeek_() {
   }
   const headers = values[0].map(function(value) { return String(value).trim(); });
   const summaryColumn = headers.indexOf('content_summary') + 1;
+  const typeColumn = headers.indexOf('content_type') + 1;
   const statusColumn = headers.indexOf('processing_status') + 1;
   const errorColumn = headers.indexOf('processing_error') + 1;
   const contentColumn = findHeader_(headers, [
@@ -85,6 +129,13 @@ function summarizeImportedWeek_() {
   }
   if (!contentColumn) {
     throw new Error('Weekly worksheet is missing the post content column.');
+  }
+  if (!typeColumn) {
+    automationLog_(
+      'WARN',
+      'GEMINI_SUMMARY',
+      'Weekly worksheet is missing content_type column; skipping content_type write.'
+    );
   }
 
   const pending = [];
@@ -126,8 +177,10 @@ function summarizeImportedWeek_() {
           sheet,
           item.sheetRow,
           summaryColumn,
+          typeColumn,
           statusColumn,
           errorColumn,
+          '',
           '',
           'failed',
           safeErrorMessage_(error)
@@ -148,16 +201,16 @@ function summarizeImportedWeek_() {
       const summary = byId[String(item.row_id)];
       if (!summary) {
         writeProcessingResult_(
-          sheet, item.sheetRow, summaryColumn, statusColumn,
-          errorColumn, '', 'failed',
+          sheet, item.sheetRow, summaryColumn, typeColumn, statusColumn,
+          errorColumn, '', '', 'failed',
           'Gemini response omitted this row.'
         );
         failed++;
         return;
       }
       writeProcessingResult_(
-        sheet, item.sheetRow, summaryColumn, statusColumn,
-        errorColumn, summary.text, 'completed', ''
+        sheet, item.sheetRow, summaryColumn, typeColumn, statusColumn,
+        errorColumn, summary.text, summary.content_type, 'completed', ''
       );
       processed++;
     });
@@ -196,7 +249,8 @@ function summarizeBatchWithRetry_(batch, config) {
           '\nYour previous response failed validation. Regenerate every ' +
           'summary and strictly return one to three complete sentences per ' +
           'post, with no more than 100 words in the combined summary for ' +
-          'each post. Preserve every row_id exactly.';
+          'each post. Also ensure each item contains a valid content_type ' +
+          'from the defined taxonomy. Preserve every row_id exactly.';
         continue;
       }
       if (isRetryableGeminiError_(error) &&
@@ -240,9 +294,19 @@ function callGemini_(batch, config, correctionInstruction) {
               type: 'OBJECT',
               properties: {
                 row_id: {type: 'INTEGER'},
-                sentences: {type: 'ARRAY', items: {type: 'STRING'}}
+                sentences: {type: 'ARRAY', items: {type: 'STRING'}},
+                content_type: {
+                  type: 'STRING',
+                  enum: [
+                    'Education',
+                    'Commercial',
+                    'Talent & Employer Branding',
+                    'Events',
+                    'Community Engagement'
+                  ]
+                }
               },
-              required: ['row_id', 'sentences']
+              required: ['row_id', 'sentences', 'content_type']
             }
           }
         },
@@ -319,7 +383,18 @@ function validateSummaryResponse_(response, batch) {
         'Gemini returned a summary longer than 100 words.'
       );
     }
-    return {row_id: Number(item.row_id), text: text};
+    if (!item.content_type ||
+        typeof item.content_type !== 'string' ||
+        VALID_CONTENT_TYPES.indexOf(item.content_type) === -1) {
+      throw new ValidationError_(
+        'Gemini returned an invalid content_type.'
+      );
+    }
+    return {
+      row_id: Number(item.row_id),
+      text: text,
+      content_type: item.content_type
+    };
   });
   if (Object.keys(seen).length !== Object.keys(expected).length) {
     throw new ValidationError_('Gemini response omitted one or more row IDs.');
@@ -343,14 +418,27 @@ function countWords_(value) {
 }
 
 function writeProcessingResult_(
-  sheet, row, summaryColumn, statusColumn, errorColumn,
-  summary, status, error
+  sheet, row, summaryColumn, typeColumn, statusColumn, errorColumn,
+  summary, contentType, status, error
 ) {
-  sheet.getRange(row, summaryColumn, 1, 3).setValues([[
-    summary,
-    status,
-    error
-  ]]);
+  if (typeColumn &&
+      typeColumn === summaryColumn + 1 &&
+      statusColumn === summaryColumn + 2 &&
+      errorColumn === summaryColumn + 3) {
+    sheet.getRange(row, summaryColumn, 1, 4).setValues([[
+      summary,
+      contentType,
+      status,
+      error
+    ]]);
+  } else {
+    sheet.getRange(row, summaryColumn).setValue(summary);
+    if (typeColumn) {
+      sheet.getRange(row, typeColumn).setValue(contentType);
+    }
+    sheet.getRange(row, statusColumn).setValue(status);
+    sheet.getRange(row, errorColumn).setValue(error);
+  }
 }
 
 function findTargetWeeklySheet_() {

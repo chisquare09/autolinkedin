@@ -6,6 +6,7 @@ const AUTOMATION_LOG_SHEET = '_automation_log';
 const RAW_RESULT_NAME = 'result.csv';
 const PIPELINE_HEADERS = [
   'content_summary',
+  'content_type',
   'processing_status',
   'processing_error'
 ];
@@ -372,7 +373,7 @@ function importAccumulatedResult_(run, config) {
     const normalizedRow = headers.map(function(header, index) {
       return row[index] === undefined ? '' : row[index];
     });
-    newRows.push(normalizedRow.concat(['', 'pending', '']));
+    newRows.push(normalizedRow.concat(['', '', 'pending', '']));
   });
 
   if (newRows.length) {
@@ -437,7 +438,7 @@ function getOrCreateWeeklySheet_(spreadsheet, period, headers) {
   const name = formatWeeklySheetName_(period.start, period.end);
   let sheet = spreadsheet.getSheetByName(name);
   if (!sheet) sheet = spreadsheet.insertSheet(name);
-  if (sheet.getLastRow() === 0) sheet.getRange(1, 1, 1, headers.length)
+  if (sheet.getLastRow() <= 1) sheet.getRange(1, 1, 1, headers.length)
     .setValues([headers]);
   return sheet;
 }

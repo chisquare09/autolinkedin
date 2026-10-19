@@ -89,6 +89,7 @@ Each weekly tab contains all raw columns returned by PhantomBuster followed by:
 
 ```text
 content_summary
+content_type
 processing_status
 processing_error
 ```

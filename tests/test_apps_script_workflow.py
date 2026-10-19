@@ -66,6 +66,22 @@ def closed_period(current, week_start):
     return start, end
 
 
+VALID_CONTENT_TYPES = {
+    "Education",
+    "Commercial",
+    "Talent & Employer Branding",
+    "Events",
+    "Community Engagement",
+}
+
+
+class SummaryResult(str):
+    def __new__(cls, text, content_type=None):
+        obj = super().__new__(cls, text)
+        obj.content_type = content_type
+        return obj
+
+
 def validate_summary_response(response, row_ids):
     summaries = response.get("summaries")
     if not isinstance(summaries, list) or len(summaries) != len(row_ids):
@@ -90,8 +106,11 @@ def validate_summary_response(response, row_ids):
         text = " ".join(sentence.strip() for sentence in sentences)
         if len(text.split()) > 100:
             raise ValueError("summary exceeds 100 words")
+        content_type = item.get("content_type")
+        if content_type is None or content_type not in VALID_CONTENT_TYPES:
+            raise ValueError("invalid content_type")
         seen.add(row_id)
-        result[row_id] = text
+        result[row_id] = SummaryResult(text, content_type)
     if seen != expected:
         raise ValueError("missing row id")
     return result
@@ -105,6 +124,9 @@ class AppsScriptWorkflowTests(unittest.TestCase):
         cls.guide_source = GUIDE.read_text()
 
     def test_apps_script_contains_required_properties_and_three_output_columns(self):
+        self.test_apps_script_contains_required_properties_and_pipeline_columns()
+
+    def test_apps_script_contains_required_properties_and_pipeline_columns(self):
         for property_name in (
             "PHANTOMBUSTER_API_KEY",
             "PHANTOMBUSTER_AGENT_ID",
@@ -118,6 +140,7 @@ class AppsScriptWorkflowTests(unittest.TestCase):
             self.assertIn("'" + property_name + "'", self.phantom_source)
 
         self.assertIn("'content_summary',", self.phantom_source)
+        self.assertIn("'content_type',", self.phantom_source)
         self.assertIn("'processing_status',", self.phantom_source)
         self.assertIn("'processing_error'", self.phantom_source)
         for removed_column in (
@@ -167,23 +190,47 @@ https://www.linkedin.com/company/acme/,https://linkedin.com/feed/update/2,2026-1
 
     def test_summary_accepts_exactly_100_words(self):
         sentence = " ".join(["word"] * 99) + "."
-        response = {"summaries": [{"row_id": 2, "sentences": [sentence]}]}
+        response = {
+            "summaries": [{
+                "row_id": 2,
+                "sentences": [sentence],
+                "content_type": "Education",
+            }]
+        }
         self.assertEqual(len(validate_summary_response(response, [2])[2].split()), 99)
 
         sentence = " ".join(["word"] * 100) + "."
-        response = {"summaries": [{"row_id": 2, "sentences": [sentence]}]}
+        response = {
+            "summaries": [{
+                "row_id": 2,
+                "sentences": [sentence],
+                "content_type": "Education",
+            }]
+        }
         self.assertEqual(len(validate_summary_response(response, [2])[2].split()), 100)
 
     def test_summary_rejects_more_than_100_words_and_invalid_rows(self):
         sentence = " ".join(["word"] * 101) + "."
         with self.assertRaisesRegex(ValueError, "100 words"):
             validate_summary_response(
-                {"summaries": [{"row_id": 2, "sentences": [sentence]}]},
+                {
+                    "summaries": [{
+                        "row_id": 2,
+                        "sentences": [sentence],
+                        "content_type": "Education",
+                    }]
+                },
                 [2],
             )
         with self.assertRaisesRegex(ValueError, "row id"):
             validate_summary_response(
-                {"summaries": [{"row_id": 3, "sentences": ["Valid."]}]},
+                {
+                    "summaries": [{
+                        "row_id": 3,
+                        "sentences": ["Valid."],
+                        "content_type": "Education",
+                    }]
+                },
                 [2],
             )
 
@@ -217,6 +264,56 @@ https://www.linkedin.com/company/acme/,https://linkedin.com/feed/update/2,2026-1
         self.assertIn("GEMINI_SUMMARY", self.guide_source)
         self.assertIn("Prompt-injection and factuality behavior", self.guide_source)
         self.assertIn("_automation_log", self.guide_source)
+
+    def test_content_type_is_in_pipeline_headers(self):
+        headers_match = re.search(
+            r"const PIPELINE_HEADERS = \[\s*'content_summary',\s*'content_type',\s*'processing_status',\s*'processing_error'\s*\];",
+            self.phantom_source,
+        )
+        self.assertIsNotNone(headers_match, "PIPELINE_HEADERS must contain content_type in correct position")
+
+    def test_content_type_enum_validated(self):
+        for cat in VALID_CONTENT_TYPES:
+            res = validate_summary_response(
+                {"summaries": [{"row_id": 1, "sentences": ["Valid post."], "content_type": cat}]},
+                [1],
+            )
+            self.assertEqual(res[1].content_type, cat)
+
+        with self.assertRaisesRegex(ValueError, "invalid content_type"):
+            validate_summary_response(
+                {"summaries": [{"row_id": 1, "sentences": ["Valid post."], "content_type": "Other"}]},
+                [1],
+            )
+
+        with self.assertRaisesRegex(ValueError, "invalid content_type"):
+            validate_summary_response(
+                {"summaries": [{"row_id": 1, "sentences": ["Valid post."]}]},
+                [1],
+            )
+
+    def test_summary_and_classification_in_single_call(self):
+        self.assertIn("CLASSIFICATION TAXONOMY", self.summary_source)
+        self.assertIn("SUMMARIZATION GUIDELINES", self.summary_source)
+        self.assertIn("Populate sentences and", self.summary_source)
+        self.assertIn("content_type for each row.", self.summary_source)
+        self.assertIn("content_type: {", self.summary_source)
+        self.assertIn("required: ['row_id', 'sentences', 'content_type']", self.summary_source)
+
+    def test_old_sheet_without_content_type_column_is_handled(self):
+        self.assertIn("const typeColumn = headers.indexOf('content_type') + 1;", self.summary_source)
+        self.assertIn("if (!typeColumn)", self.summary_source)
+        self.assertIn("if (typeColumn)", self.summary_source)
+
+    def test_correction_instruction_mentions_content_type(self):
+        self.assertIn(
+            "Also ensure each item contains a valid content_type",
+            self.summary_source,
+        )
+        self.assertIn(
+            "from the defined taxonomy.",
+            self.summary_source,
+        )
 
 
 if __name__ == "__main__":
